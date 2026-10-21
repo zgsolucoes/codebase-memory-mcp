@@ -3705,10 +3705,69 @@ static TSNode annotation_arg_key(TSNode arg) {
     return (strcmp(fk, "identifier") == 0 || strcmp(fk, "simple_identifier") == 0) ? first : none;
 }
 
-/* First string value of the annotation attribute `key` (`topics = "x"`,
- * `topics = ["x", "y"]`), across the Java, Kotlin and Groovy shapes. */
-static const char *annotation_named_string(CBMArena *a, TSNode args, const char *source,
-                                           const char *key) {
+/* Unquoted value of the string constant `name` declared in `class_node`'s
+ * body (Java field_declaration / interface constant_declaration, Groovy
+ * declaration) whose initializer is a plain string literal; NULL otherwise. */
+static const char *class_string_constant(CBMArena *a, TSNode class_node, const char *source,
+                                         const char *name) {
+    TSNode body = ts_node_child_by_field_name(class_node, TS_FIELD("body"));
+    uint32_t nc = ts_node_is_null(body) ? 0 : ts_node_named_child_count(body);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode decl = ts_node_named_child(body, i);
+        TSNode var = ts_node_child_by_field_name(decl, TS_FIELD("declarator"));
+        if (ts_node_is_null(var)) {
+            var = decl; /* Groovy: name/value sit on the declaration itself */
+        }
+        TSNode nm = ts_node_child_by_field_name(var, TS_FIELD("name"));
+        TSNode val = ts_node_child_by_field_name(var, TS_FIELD("value"));
+        if (ts_node_is_null(nm) || ts_node_is_null(val) ||
+            !is_route_string_kind(ts_node_type(val))) {
+            continue;
+        }
+        const char *n = cbm_node_text(a, nm, source);
+        if (n && strcmp(n, name) == 0) {
+            return first_string_literal(a, val, source);
+        }
+    }
+    return NULL;
+}
+
+/* A topic value: a string literal, or a reference (`NAME`, `Owner.NAME`,
+ * alone or as the first element of an array) to a string constant of the
+ * enclosing class. A foreign `Other.NAME` stays unresolved. */
+static const char *topic_value(CBMArena *a, TSNode v, TSNode class_node, const char *source) {
+    const char *lit = first_string_literal(a, v, source);
+    if (lit || ts_node_is_null(class_node)) {
+        return lit;
+    }
+    const char *kind = ts_node_type(v);
+    if (strcmp(kind, "list") == 0 || strcmp(kind, "element_value_array_initializer") == 0) {
+        v = ts_node_named_child(v, 0);
+        kind = ts_node_is_null(v) ? "" : ts_node_type(v);
+    }
+    if (strcmp(kind, "identifier") != 0 && strcmp(kind, "field_access") != 0 &&
+        strcmp(kind, "dotted_identifier") != 0) {
+        return NULL;
+    }
+    char *ref = cbm_node_text(a, v, source);
+    char *dot = ref ? strrchr(ref, '.') : NULL;
+    if (dot) {
+        *dot = '\0';
+        TSNode cn = ts_node_child_by_field_name(class_node, TS_FIELD("name"));
+        const char *owner = ts_node_is_null(cn) ? NULL : cbm_node_text(a, cn, source);
+        if (!owner || strcmp(owner, ref) != 0) {
+            return NULL;
+        }
+        ref = dot + SKIP_CHAR;
+    }
+    return ref ? class_string_constant(a, class_node, source, ref) : NULL;
+}
+
+/* First topic value of the annotation attribute `key` (`topics = "x"`,
+ * `topics = ["x", "y"]`, `topics = NAME`), across the Java, Kotlin and
+ * Groovy shapes. */
+static const char *annotation_named_string(CBMArena *a, TSNode args, TSNode class_node,
+                                           const char *source, const char *key) {
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t i = 0; i < nc; i++) {
         TSNode k = annotation_arg_key(ts_node_named_child(args, i));
@@ -3723,7 +3782,8 @@ static const char *annotation_named_string(CBMArena *a, TSNode args, const char 
             if (j > i && !ts_node_is_null(annotation_arg_key(v))) {
                 break;
             }
-            const char *s = first_string_literal(a, v, source);
+            TSNode val = ts_node_child_by_field_name(v, TS_FIELD("value"));
+            const char *s = topic_value(a, ts_node_is_null(val) ? v : val, class_node, source);
             if (s) {
                 return s;
             }
@@ -3737,8 +3797,9 @@ static const char *annotation_named_string(CBMArena *a, TSNode args, const char 
  * Micronaut @Topic("t") on a method of a @KafkaListener class. The route is
  * the raw topic under method "kafka", the shape a producer's ASYNC_CALLS
  * targets. @Topic on a @KafkaClient is a producer: method "kafka_send", which
- * the pipeline turns into ASYNC_CALLS to that route. Topics without a
- * static value (SpEL "#{..}", placeholders "${..}", constants) are skipped.
+ * the pipeline turns into ASYNC_CALLS to that route. A topic may be a
+ * same-class string constant (topic_value); topics without a static value
+ * (SpEL "#{..}", placeholders "${..}", foreign constants) are skipped.
  * shortcut: only the first topic of a multi-topic listener, upgrade when a
  * definition can carry several routes. */
 static void kafka_listener_route(CBMArena *a, TSNode method_node, TSNode class_node,
@@ -3753,7 +3814,9 @@ static void kafka_listener_route(CBMArena *a, TSNode method_node, TSNode class_n
     TSNode ann = find_jvm_annotation(a, method_node, source, spec, "KafkaListener", NULL);
     if (!ts_node_is_null(ann)) {
         TSNode args = annotation_args_node(ann);
-        topic = ts_node_is_null(args) ? NULL : annotation_named_string(a, args, source, "topics");
+        topic = ts_node_is_null(args)
+                    ? NULL
+                    : annotation_named_string(a, args, class_node, source, "topics");
     } else {
         ann = find_jvm_annotation(a, method_node, source, spec, "Topic", NULL);
         if (ts_node_is_null(ann)) {
@@ -3767,7 +3830,12 @@ static void kafka_listener_route(CBMArena *a, TSNode method_node, TSNode class_n
             return;
         }
         TSNode args = annotation_args_node(ann);
-        topic = ts_node_is_null(args) ? NULL : first_string_literal(a, args, source);
+        TSNode first = ts_node_is_null(args) ? args : ts_node_named_child(args, 0);
+        TSNode val =
+            ts_node_is_null(first) ? first : ts_node_child_by_field_name(first, TS_FIELD("value"));
+        topic = ts_node_is_null(first)
+                    ? NULL
+                    : topic_value(a, ts_node_is_null(val) ? first : val, class_node, source);
     }
     if (!topic || !topic[0] || strstr(topic, "${") || strstr(topic, "#{")) {
         return;
