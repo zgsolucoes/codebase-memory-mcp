@@ -1996,6 +1996,41 @@ TEST(http_calls_resttemplate_java) {
     PASS();
 }
 
+/* RestTemplate (Groovy) — same fixture as http_calls_resttemplate_java. The
+ * Groovy grammar names a call's argument field `args`, not `arguments`, so
+ * no Groovy call carried a first string argument and no URL ever formed. */
+TEST(http_calls_resttemplate_groovy) {
+    static const EtFile f[] = {
+        {"http/RestTemplate.groovy",
+         "package http\n\n"
+         "class RestTemplate {\n"
+         "    Object getForObject(String url, Class responseType) { null }\n"
+         "}\n"},
+        {"client/OrderClient.groovy",
+         "package client\n\n"
+         "import http.RestTemplate\n\n"
+         "class OrderClient {\n"
+         "    RestTemplate rest = new RestTemplate()\n\n"
+         "    Object fetchOrders() {\n"
+         "        rest.getForObject('/api/orders', Object)\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HTTP_CALLS", 1));
+    PASS();
+}
+
+/* Spring Kafka (Groovy) — kafkaTemplate.send('topic', payload) is classified
+ * by the "kafka" spelling of the callee and needs the topic argument. */
+TEST(async_calls_kafka_template_groovy) {
+    static const EtFile f[] = {
+        {"events/OrderEvents.groovy",
+         "package events\n\n"
+         "class OrderEvents {\n"
+         "    def kafkaTemplate\n\n"
+         "    void orderCreated(String id) {\n"
+         "        kafkaTemplate.send('order-created', id)\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "ASYNC_CALLS", 1));
+    PASS();
+}
+
 /* RestSharp (C#) — static RestClient.Get call under a RestSharp/ path so the
  * resolved QN carries the "RestSharp" substring.
  * REAL BUG (CONFIRMED: still HTTP_CALLS=0 after switching to a static call that
@@ -3104,6 +3139,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(http_calls_requests_python);
     RUN_TEST(http_calls_nethttp_go);
     RUN_TEST(http_calls_resttemplate_java);
+    RUN_TEST(http_calls_resttemplate_groovy);
+    RUN_TEST(async_calls_kafka_template_groovy);
     RUN_TEST(http_calls_restsharp_csharp);
     RUN_TEST(http_calls_httparty_ruby);
     RUN_TEST(http_calls_guzzle_php);
