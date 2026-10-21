@@ -782,6 +782,50 @@ TEST(handles_jaxrs_scala) {
     PASS();
 }
 
+/* Spring (Groovy) — same contract as handles_spring_java. The Groovy grammar
+ * gives an annotation an unnamed `identifier` child (no `name` field, no
+ * `user_type`), so the annotation name was never read and no Route formed. */
+TEST(handles_spring_groovy) {
+    static const char *routes[] = {"/api/orders", "/api/orders/{id}", NULL};
+    static const EtFile f[] = {
+        {"OrderController.groovy",
+         "package com.example\n\n"
+         "import org.springframework.web.bind.annotation.RequestMapping\n"
+         "import org.springframework.web.bind.annotation.GetMapping\n\n"
+         "@RequestMapping('/api')\nclass OrderController {\n"
+         "    @GetMapping('/orders')\n"
+         "    String listOrders() {\n"
+         "        'orders'\n    }\n\n"
+         "    @GetMapping(\"/orders/{id}\")\n"
+         "    String getOrder(int id) {\n"
+         "        \"order:${id}\"\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* JAX-RS (Groovy) — verb and path as sibling annotations, class-level @Path
+ * prefix, as in handles_jaxrs_java. */
+TEST(handles_jaxrs_groovy) {
+    static const char *routes[] = {"/api/v1/widgets", "/api/v1/widgets/count", NULL};
+    static const EtFile f[] = {
+        {"WidgetResource.groovy",
+         "package com.example\n\n"
+         "import javax.ws.rs.GET\n"
+         "import javax.ws.rs.Path\n\n"
+         "@Path('/api/v1/widgets')\nclass WidgetResource {\n"
+         "    @GET\n"
+         "    String list() {\n"
+         "        'widgets'\n    }\n\n"
+         "    @GET\n"
+         "    @Path('count')\n"
+         "    String count() {\n"
+         "        '42'\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
 /* ASP.NET Minimal API (C#) — route registration via static MapGet/MapPost calls
  * with identifier handlers, under a Microsoft/AspNetCore path so the resolved
  * callee QN carries the "MapGet"/"Microsoft.AspNetCore" route-reg substrings.
@@ -2871,6 +2915,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_jaxrs_java_relative_path);
     RUN_TEST(handles_spring_java_relative_string_not_route);
     RUN_TEST(handles_jaxrs_scala);
+    RUN_TEST(handles_spring_groovy);
+    RUN_TEST(handles_jaxrs_groovy);
     RUN_TEST(handles_aspnet_csharp);
     RUN_TEST(handles_aspnet_attribute_routes_issue1692);
     RUN_TEST(handles_aspnet_attribute_routes_issue1041);

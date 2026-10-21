@@ -3420,6 +3420,14 @@ static TSNode annotation_name_node(TSNode annotation) {
         }
         return ti;
     }
+    /* Groovy: `annotation` carries its name as a plain, unnamed `identifier`
+     * child (no `name` field, no `user_type`). */
+    if (strcmp(ts_node_type(annotation), "annotation") == 0) {
+        TSNode id = cbm_find_child_by_kind(annotation, "identifier");
+        if (!ts_node_is_null(id)) {
+            return id;
+        }
+    }
     TSNode null_node = {0};
     return null_node;
 }
@@ -8801,7 +8809,7 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
     def.decorators = extract_decorators(a, child, ctx->source, ctx->language, spec);
     extract_route_from_decorators(a, child, ctx->source, spec, &def.route_path, &def.route_method);
     if (def.route_path && (ctx->language == CBM_LANG_JAVA || ctx->language == CBM_LANG_KOTLIN ||
-                           ctx->language == CBM_LANG_SCALA)) {
+                           ctx->language == CBM_LANG_SCALA || ctx->language == CBM_LANG_GROOVY)) {
         const char *prefix = spring_class_route_prefix(a, class_node, ctx->source, spec);
         def.route_path = join_route_paths(a, prefix, def.route_path);
     }
