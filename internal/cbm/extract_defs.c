@@ -977,9 +977,11 @@ TSNode cbm_resolve_func_name(TSNode node, CBMLanguage lang) {
             }
         }
 
-        /* Groovy: top-level function_definition carries the name on the `function`
-         * field (not `name`); fall back to the first `identifier` child. */
-        if (lang == CBM_LANG_GROOVY && strcmp(kind, "function_definition") == 0) {
+        /* Groovy: function_definition (and the bodiless function_declaration of
+         * interface/abstract methods) carries the name on the `function` field
+         * (not `name`); fall back to the first `identifier` child. */
+        if (lang == CBM_LANG_GROOVY && (strcmp(kind, "function_definition") == 0 ||
+                                        strcmp(kind, "function_declaration") == 0)) {
             TSNode fn = ts_node_child_by_field_name(node, TS_FIELD("function"));
             if (ts_node_is_null(fn)) {
                 fn = cbm_find_child_by_kind(node, "identifier");
@@ -3732,9 +3734,10 @@ static const char *annotation_named_string(CBMArena *a, TSNode args, const char 
 }
 
 /* Kafka consumer: Spring @KafkaListener(topics = "t") on the method, or
- * Micronaut @Topic("t") on a method of a @KafkaListener class (@Topic on a
- * @KafkaClient is a producer). The route is the raw topic under method
- * "kafka", the shape a producer's ASYNC_CALLS targets. Topics without a
+ * Micronaut @Topic("t") on a method of a @KafkaListener class. The route is
+ * the raw topic under method "kafka", the shape a producer's ASYNC_CALLS
+ * targets. @Topic on a @KafkaClient is a producer: method "kafka_send", which
+ * the pipeline turns into ASYNC_CALLS to that route. Topics without a
  * static value (SpEL "#{..}", placeholders "${..}", constants) are skipped.
  * shortcut: only the first topic of a multi-topic listener, upgrade when a
  * definition can carry several routes. */
@@ -3746,14 +3749,21 @@ static void kafka_listener_route(CBMArena *a, TSNode method_node, TSNode class_n
         return;
     }
     const char *topic = NULL;
+    const char *kind = "kafka";
     TSNode ann = find_jvm_annotation(a, method_node, source, spec, "KafkaListener", NULL);
     if (!ts_node_is_null(ann)) {
         TSNode args = annotation_args_node(ann);
         topic = ts_node_is_null(args) ? NULL : annotation_named_string(a, args, source, "topics");
     } else {
         ann = find_jvm_annotation(a, method_node, source, spec, "Topic", NULL);
-        if (ts_node_is_null(ann) || ts_node_is_null(find_jvm_annotation(a, class_node, source, spec,
-                                                                        "KafkaListener", NULL))) {
+        if (ts_node_is_null(ann)) {
+            return;
+        }
+        if (!ts_node_is_null(
+                find_jvm_annotation(a, class_node, source, spec, "KafkaClient", NULL))) {
+            kind = "kafka_send";
+        } else if (ts_node_is_null(
+                       find_jvm_annotation(a, class_node, source, spec, "KafkaListener", NULL))) {
             return;
         }
         TSNode args = annotation_args_node(ann);
@@ -3763,7 +3773,7 @@ static void kafka_listener_route(CBMArena *a, TSNode method_node, TSNode class_n
         return;
     }
     *out_path = topic;
-    *out_method = "kafka";
+    *out_method = kind;
 }
 
 static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const char *source,
@@ -8905,7 +8915,8 @@ static TSNode resolve_method_name(TSNode child, CBMLanguage lang) {
         return cbm_resolve_func_name(child, lang);
     }
 
-    if (lang == CBM_LANG_GROOVY && strcmp(ck, "function_definition") == 0) {
+    if (lang == CBM_LANG_GROOVY &&
+        (strcmp(ck, "function_definition") == 0 || strcmp(ck, "function_declaration") == 0)) {
         TSNode fn = ts_node_child_by_field_name(child, TS_FIELD("function"));
         if (!ts_node_is_null(fn)) {
             return fn;
