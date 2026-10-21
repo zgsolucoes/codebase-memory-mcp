@@ -4537,6 +4537,10 @@ CBMInvocationDescriptor handle_calls(CBMExtractCtx *ctx, TSNode node, const CBML
             if (ts_node_is_null(args) && ctx->language == CBM_LANG_SWIFT) {
                 args = swift_call_args(node);
             }
+            // Groovy names the field `args`.
+            if (ts_node_is_null(args) && ctx->language == CBM_LANG_GROOVY) {
+                args = ts_node_child_by_field_name(node, TS_FIELD("args"));
+            }
             if (!ts_node_is_null(args)) {
                 call.first_string_arg = extract_url_or_topic_arg(ctx, args, call.callee_name);
                 /* #1146: a Laravel registration's slashless URI ('users', '')
