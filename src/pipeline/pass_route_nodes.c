@@ -401,17 +401,44 @@ static void match_infra_routes(cbm_gbuf_t *gb) {
  * same `__route__kafka__<topic>` QN a producer's ASYNC_CALLS edge builds;
  * HTTP routes use the canonical path. */
 static bool def_route_is_broker(const char *method) {
-    return method && strcmp(method, "kafka") == 0;
+    return method && (strcmp(method, "kafka") == 0 || strcmp(method, "kafka_send") == 0);
+}
+
+/* A Micronaut @KafkaClient method publishes to its topic (extract_defs.c). */
+static bool def_route_is_producer(const char *method) {
+    return method && strcmp(method, "kafka_send") == 0;
 }
 
 static void def_route_qn_props(const char *path, const char *method, char *qn, size_t qn_size,
                                char *props, size_t props_size) {
     char cpath[CBM_SZ_256];
     bool broker = def_route_is_broker(method);
-    snprintf(qn, qn_size, "__route__%s__%s", method,
-             broker ? path : cbm_route_canon_path(path, cpath, sizeof(cpath)));
-    snprintf(props, props_size, "{\"%s\":\"%s\",\"source\":\"decorator\"}",
-             broker ? "broker" : "method", method);
+    const char *rm = broker ? "kafka" : method;
+    (void)snprintf(qn, qn_size, "__route__%s__%s", rm,
+                   broker ? path : cbm_route_canon_path(path, cpath, sizeof(cpath)));
+    (void)snprintf(props, props_size, "{\"%s\":\"%s\",\"source\":\"decorator\"}",
+                   broker ? "broker" : "method", rm);
+}
+
+/* Edge from a route-carrying definition to its Route: HANDLES for a handler,
+ * ASYNC_CALLS (with the url_path/broker cross-repo matching reads) for a
+ * producer. */
+static void def_route_link(cbm_gbuf_t *gb, int64_t func_id, int64_t route_id, const char *qn,
+                           const char *path, const char *method) {
+    char esc_q[CBM_SZ_512];
+    char props[CBM_SZ_1K];
+    cbm_json_escape(esc_q, sizeof(esc_q), qn ? qn : "");
+    if (def_route_is_producer(method)) {
+        char esc_p[CBM_SZ_256];
+        cbm_json_escape(esc_p, sizeof(esc_p), path);
+        (void)snprintf(props, sizeof(props),
+                       "{\"callee\":\"%s\",\"url_path\":\"%s\",\"broker\":\"kafka\"}", esc_q,
+                       esc_p);
+        cbm_gbuf_insert_edge(gb, func_id, route_id, "ASYNC_CALLS", props);
+        return;
+    }
+    (void)snprintf(props, sizeof(props), "{\"handler\":\"%s\"}", esc_q);
+    cbm_gbuf_insert_edge(gb, func_id, route_id, "HANDLES", props);
 }
 
 void cbm_pipeline_emit_def_route(cbm_gbuf_t *gb, int64_t func_id, const CBMDefinition *def,
@@ -425,11 +452,7 @@ void cbm_pipeline_emit_def_route(cbm_gbuf_t *gb, int64_t func_id, const CBMDefin
     def_route_qn_props(def->route_path, rm, route_qn, sizeof(route_qn), rprops, sizeof(rprops));
     int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", def->route_path, route_qn,
                                             def->file_path ? def->file_path : rel, 0, 0, rprops);
-    char hprops[CBM_SZ_512];
-    char esc_h[CBM_SZ_512];
-    cbm_json_escape(esc_h, sizeof(esc_h), def->qualified_name);
-    snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
-    cbm_gbuf_insert_edge(gb, func_id, route_id, "HANDLES", hprops);
+    def_route_link(gb, func_id, route_id, def->qualified_name, def->route_path, rm);
 }
 
 /* Phase 2a: Ensure all functions with route_path properties have Route+HANDLES edges.
@@ -485,20 +508,19 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
                                             func->file_path ? func->file_path : "", 0, 0, rprops);
 
     if (existing) {
-        const cbm_gbuf_edge_t **existing_handles = NULL;
-        int eh_count = 0;
-        cbm_gbuf_find_edges_by_target_type(gb, route_id, "HANDLES", &existing_handles, &eh_count);
-        for (int eh = 0; eh < eh_count; eh++) {
-            if (existing_handles[eh]->source_id == func->id) {
+        const cbm_gbuf_edge_t **existing_links = NULL;
+        int el_count = 0;
+        cbm_gbuf_find_edges_by_target_type(
+            gb, route_id, def_route_is_producer(method) ? "ASYNC_CALLS" : "HANDLES",
+            &existing_links, &el_count);
+        for (int el = 0; el < el_count; el++) {
+            if (existing_links[el]->source_id == func->id) {
                 return 0;
             }
         }
     }
 
-    char hprops[CBM_SZ_512];
-    snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}",
-             func->qualified_name ? func->qualified_name : "");
-    cbm_gbuf_insert_edge(gb, func->id, route_id, "HANDLES", hprops);
+    def_route_link(gb, func->id, route_id, func->qualified_name, path, method);
     return SKIP_ONE;
 }
 

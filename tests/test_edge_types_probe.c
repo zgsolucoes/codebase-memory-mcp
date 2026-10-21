@@ -972,6 +972,21 @@ TEST(handles_kafka_listener_unresolved_or_producer_not_route) {
     PASS();
 }
 
+/* Micronaut @KafkaClient — each @Topic method publishes to its topic, so
+ * it carries an ASYNC_CALLS edge to `__route__kafka__<topic>` (the route a
+ * consumer HANDLES) instead of a HANDLES edge of its own. */
+TEST(async_calls_micronaut_kafka_client_groovy) {
+    static const char *routes[] = {"jobs.executavel.agendar", NULL};
+    static const EtFile f[] = {{"JobsProducer.groovy",
+                                "package com.example\n\n"
+                                "@KafkaClient\ninterface JobsProducer {\n"
+                                "    @Topic('jobs.executavel.agendar')\n"
+                                "    void agendar(String msg)\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "ASYNC_CALLS", 1));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
 /* ASP.NET Minimal API (C#) — route registration via static MapGet/MapPost calls
  * with identifier handlers, under a Microsoft/AspNetCore path so the resolved
  * callee QN carries the "MapGet"/"Microsoft.AspNetCore" route-reg substrings.
@@ -3070,6 +3085,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_kafka_listener_spring_groovy);
     RUN_TEST(handles_kafka_listener_micronaut_groovy);
     RUN_TEST(handles_kafka_listener_unresolved_or_producer_not_route);
+    RUN_TEST(async_calls_micronaut_kafka_client_groovy);
     RUN_TEST(handles_aspnet_csharp);
     RUN_TEST(handles_aspnet_attribute_routes_issue1692);
     RUN_TEST(handles_aspnet_attribute_routes_issue1041);
