@@ -397,6 +397,23 @@ static void match_infra_routes(cbm_gbuf_t *gb) {
     }
 }
 
+/* A consumer route (route method "kafka") is keyed by the raw topic, the
+ * same `__route__kafka__<topic>` QN a producer's ASYNC_CALLS edge builds;
+ * HTTP routes use the canonical path. */
+static bool def_route_is_broker(const char *method) {
+    return method && strcmp(method, "kafka") == 0;
+}
+
+static void def_route_qn_props(const char *path, const char *method, char *qn, size_t qn_size,
+                               char *props, size_t props_size) {
+    char cpath[CBM_SZ_256];
+    bool broker = def_route_is_broker(method);
+    snprintf(qn, qn_size, "__route__%s__%s", method,
+             broker ? path : cbm_route_canon_path(path, cpath, sizeof(cpath)));
+    snprintf(props, props_size, "{\"%s\":\"%s\",\"source\":\"decorator\"}",
+             broker ? "broker" : "method", method);
+}
+
 void cbm_pipeline_emit_def_route(cbm_gbuf_t *gb, int64_t func_id, const CBMDefinition *def,
                                  const char *rel) {
     if (!def->route_path || def->route_path[0] == '\0') {
@@ -404,11 +421,8 @@ void cbm_pipeline_emit_def_route(cbm_gbuf_t *gb, int64_t func_id, const CBMDefin
     }
     const char *rm = def->route_method ? def->route_method : "ANY";
     char route_qn[CBM_ROUTE_QN_SIZE];
-    char cpath[CBM_SZ_256];
-    snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", rm,
-             cbm_route_canon_path(def->route_path, cpath, sizeof(cpath)));
     char rprops[CBM_SZ_256];
-    snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", rm);
+    def_route_qn_props(def->route_path, rm, route_qn, sizeof(route_qn), rprops, sizeof(rprops));
     int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", def->route_path, route_qn,
                                             def->file_path ? def->file_path : rel, 0, 0, rprops);
     char hprops[CBM_SZ_512];
@@ -457,21 +471,16 @@ static int ensure_one_decorator_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *fun
     if (!extract_json_prop(func->properties_json, "route_path", path, sizeof(path))) {
         return 0;
     }
-    if (path[0] != '/') {
+    char method[CBM_SZ_16] = "ANY";
+    extract_json_prop(func->properties_json, "route_method", method, sizeof(method));
+    if (path[0] != '/' && !def_route_is_broker(method)) {
         return 0;
     }
 
-    char method[CBM_SZ_16] = "ANY";
-    extract_json_prop(func->properties_json, "route_method", method, sizeof(method));
-
     char route_qn[CBM_ROUTE_QN_SIZE];
-    char cpath[CBM_SZ_256];
-    snprintf(route_qn, sizeof(route_qn), "__route__%s__%s", method,
-             cbm_route_canon_path(path, cpath, sizeof(cpath)));
-    const cbm_gbuf_node_t *existing = cbm_gbuf_find_by_qn(gb, route_qn);
-
     char rprops[CBM_SZ_256];
-    snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", method);
+    def_route_qn_props(path, method, route_qn, sizeof(route_qn), rprops, sizeof(rprops));
+    const cbm_gbuf_node_t *existing = cbm_gbuf_find_by_qn(gb, route_qn);
     int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", path, route_qn,
                                             func->file_path ? func->file_path : "", 0, 0, rprops);
 

@@ -3643,6 +3643,129 @@ static void micronaut_action_route(CBMArena *a, TSNode method_node, TSNode class
     *out_method = verb;
 }
 
+/* Unquoted text of the first string literal in `node`'s subtree, depth
+ * bounded by CBM_DESCENDANT_MAX_DEPTH (iterative pre-order walk). */
+static const char *first_string_literal(CBMArena *a, TSNode node, const char *source) {
+    if (ts_node_is_null(node)) {
+        return NULL;
+    }
+    TSTreeCursor cur = ts_tree_cursor_new(node);
+    TSNode hit = {0};
+    int depth = 0;
+    bool walking = true;
+    while (walking) {
+        TSNode n = ts_tree_cursor_current_node(&cur);
+        if (ts_node_is_named(n) && is_route_string_kind(ts_node_type(n))) {
+            hit = n;
+            break;
+        }
+        if (depth < CBM_DESCENDANT_MAX_DEPTH && ts_tree_cursor_goto_first_child(&cur)) {
+            depth++;
+            continue;
+        }
+        while (depth > 0 && !ts_tree_cursor_goto_next_sibling(&cur)) {
+            ts_tree_cursor_goto_parent(&cur);
+            depth--;
+        }
+        walking = depth > 0;
+    }
+    ts_tree_cursor_delete(&cur);
+    if (ts_node_is_null(hit)) {
+        return NULL;
+    }
+    char *text = cbm_node_text(a, hit, source);
+    size_t len = text ? strlen(text) : 0;
+    if (len >= PAIR_CHARS && (text[0] == '"' || text[0] == '\'')) {
+        return cbm_arena_strndup(a, text + SKIP_CHAR, len - PAIR_CHARS);
+    }
+    return text;
+}
+
+/* The attribute-name node of one annotation argument: Java's
+ * element_value_pair `key`, Kotlin's value_argument name, or — in Groovy,
+ * whose grammar has no named-argument form here — a bare identifier, alone
+ * or wrapped in ERROR, followed by its value as the next sibling. */
+static TSNode annotation_arg_key(TSNode arg) {
+    TSNode key = ts_node_child_by_field_name(arg, TS_FIELD("key"));
+    if (!ts_node_is_null(key)) {
+        return key;
+    }
+    const char *kind = ts_node_type(arg);
+    if (strcmp(kind, "identifier") == 0) {
+        return arg;
+    }
+    TSNode none = {0};
+    if (strcmp(kind, "ERROR") != 0 && strcmp(kind, "value_argument") != 0) {
+        return none;
+    }
+    TSNode first = ts_node_named_child(arg, 0);
+    const char *fk = ts_node_is_null(first) ? "" : ts_node_type(first);
+    return (strcmp(fk, "identifier") == 0 || strcmp(fk, "simple_identifier") == 0) ? first : none;
+}
+
+/* First string value of the annotation attribute `key` (`topics = "x"`,
+ * `topics = ["x", "y"]`), across the Java, Kotlin and Groovy shapes. */
+static const char *annotation_named_string(CBMArena *a, TSNode args, const char *source,
+                                           const char *key) {
+    uint32_t nc = ts_node_named_child_count(args);
+    for (uint32_t i = 0; i < nc; i++) {
+        TSNode k = annotation_arg_key(ts_node_named_child(args, i));
+        const char *name = ts_node_is_null(k) ? NULL : cbm_node_text(a, k, source);
+        if (!name || strcmp(name, key) != 0) {
+            continue;
+        }
+        /* The value sits in the pair itself, or in the following siblings
+         * up to the next attribute name (Groovy). */
+        for (uint32_t j = i; j < nc; j++) {
+            TSNode v = ts_node_named_child(args, j);
+            if (j > i && !ts_node_is_null(annotation_arg_key(v))) {
+                break;
+            }
+            const char *s = first_string_literal(a, v, source);
+            if (s) {
+                return s;
+            }
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
+/* Kafka consumer: Spring @KafkaListener(topics = "t") on the method, or
+ * Micronaut @Topic("t") on a method of a @KafkaListener class (@Topic on a
+ * @KafkaClient is a producer). The route is the raw topic under method
+ * "kafka", the shape a producer's ASYNC_CALLS targets. Topics without a
+ * static value (SpEL "#{..}", placeholders "${..}", constants) are skipped.
+ * shortcut: only the first topic of a multi-topic listener, upgrade when a
+ * definition can carry several routes. */
+static void kafka_listener_route(CBMArena *a, TSNode method_node, TSNode class_node,
+                                 CBMLanguage lang, const char *source, const CBMLangSpec *spec,
+                                 const char **out_path, const char **out_method) {
+    if (*out_path ||
+        (lang != CBM_LANG_JAVA && lang != CBM_LANG_KOTLIN && lang != CBM_LANG_GROOVY)) {
+        return;
+    }
+    const char *topic = NULL;
+    TSNode ann = find_jvm_annotation(a, method_node, source, spec, "KafkaListener", NULL);
+    if (!ts_node_is_null(ann)) {
+        TSNode args = annotation_args_node(ann);
+        topic = ts_node_is_null(args) ? NULL : annotation_named_string(a, args, source, "topics");
+    } else {
+        ann = find_jvm_annotation(a, method_node, source, spec, "Topic", NULL);
+        if (ts_node_is_null(ann) || ts_node_is_null(find_jvm_annotation(a, class_node, source, spec,
+                                                                        "KafkaListener", NULL))) {
+            return;
+        }
+        TSNode args = annotation_args_node(ann);
+        topic = ts_node_is_null(args) ? NULL : first_string_literal(a, args, source);
+    }
+    if (!topic || !topic[0] || strstr(topic, "${") || strstr(topic, "#{")) {
+        return;
+    }
+    *out_path = topic;
+    *out_method = "kafka";
+}
+
 static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const char *source,
                                            const CBMLangSpec *spec, const char **out_path,
                                            const char **out_method) {
@@ -8920,6 +9043,8 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
     }
     micronaut_action_route(a, child, class_node, ctx->language, ctx->source, spec, &def.route_path,
                            &def.route_method);
+    kafka_listener_route(a, child, class_node, ctx->language, ctx->source, spec, &def.route_path,
+                         &def.route_method);
     if (def.route_path && (ctx->language == CBM_LANG_TYPESCRIPT || ctx->language == CBM_LANG_TSX)) {
         /* NestJS: a verb decorator only routes inside a @Controller class. */
         const char *prefix = nest_class_route_prefix(a, class_node, ctx->source);

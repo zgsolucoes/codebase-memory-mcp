@@ -897,6 +897,81 @@ TEST(handles_micronaut_client_not_route) {
     PASS();
 }
 
+/* HANDLES count of a fixture, for the exact-zero negative controls. */
+static int et_handles_count(const EtFile *f, int n) {
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, f, n);
+    int got = store ? cbm_store_count_edges_by_type(store, lp.project, "HANDLES") : -1;
+    et_cleanup(&lp, store);
+    return got;
+}
+
+/* Kafka consumers form a broker Route named by the raw topic, the same
+ * `__route__kafka__<topic>` a producer's ASYNC_CALLS edge targets, so
+ * cross-repo async matching has a HANDLES edge to land on. Spring
+ * (Java): the topic is the `topics` attribute, wherever it sits. */
+TEST(handles_kafka_listener_spring_java) {
+    static const char *routes[] = {"order-created", NULL};
+    static const EtFile f[] = {
+        {"OrderListener.java",
+         "package com.example;\n\n"
+         "import org.springframework.kafka.annotation.KafkaListener;\n\n"
+         "public class OrderListener {\n"
+         "    @KafkaListener(id = \"orders\", topics = \"order-created\", groupId = \"g\")\n"
+         "    public void onOrder(String msg) {\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Spring (Groovy) — same contract in Groovy annotation syntax. */
+TEST(handles_kafka_listener_spring_groovy) {
+    static const char *routes[] = {"jobs.item.fila.execucao.status", NULL};
+    static const EtFile f[] = {
+        {"JobsListener.groovy",
+         "package com.example\n\n"
+         "import org.springframework.kafka.annotation.KafkaListener\n\n"
+         "class JobsListener {\n"
+         "    @KafkaListener(groupId = 'submission', topics = 'jobs.item.fila.execucao.status')\n"
+         "    void onStatus(String msg) {\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Micronaut (Groovy) — @Topic on a method of a @KafkaListener class. */
+TEST(handles_kafka_listener_micronaut_groovy) {
+    static const char *routes[] = {"jobs.executavel.agendar", NULL};
+    static const EtFile f[] = {{"AgendamentoConsumer.groovy",
+                                "package com.example\n\n"
+                                "import io.micronaut.configuration.kafka.annotation.*\n\n"
+                                "@KafkaListener(groupId = 'jobs')\nclass AgendamentoConsumer {\n"
+                                "    @Topic('jobs.executavel.agendar')\n"
+                                "    void receber(String msg) {\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Negative controls: a SpEL/placeholder topic has no static value, and
+ * @Topic on a @KafkaClient interface is a producer, not a consumer. */
+TEST(handles_kafka_listener_unresolved_or_producer_not_route) {
+    static const EtFile spel[] = {
+        {"SchedulingListener.groovy",
+         "package com.example\n\n"
+         "class SchedulingListener {\n"
+         "    @KafkaListener(topics = \"#{topicNameProvider.schedulingUpdate()}\")\n"
+         "    void onUpdate(String msg) {\n    }\n}\n"}};
+    static const EtFile producer[] = {{"JobsProducer.groovy",
+                                       "package com.example\n\n"
+                                       "@KafkaClient\ninterface JobsProducer {\n"
+                                       "    @Topic('jobs.executavel.agendar')\n"
+                                       "    void agendar(String msg)\n}\n"}};
+    ASSERT_EQ(et_handles_count(spel, 1), 0);
+    ASSERT_EQ(et_handles_count(producer, 1), 0);
+    PASS();
+}
+
 /* ASP.NET Minimal API (C#) — route registration via static MapGet/MapPost calls
  * with identifier handlers, under a Microsoft/AspNetCore path so the resolved
  * callee QN carries the "MapGet"/"Microsoft.AspNetCore" route-reg substrings.
@@ -2991,6 +3066,10 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_micronaut_java);
     RUN_TEST(handles_micronaut_groovy);
     RUN_TEST(handles_micronaut_client_not_route);
+    RUN_TEST(handles_kafka_listener_spring_java);
+    RUN_TEST(handles_kafka_listener_spring_groovy);
+    RUN_TEST(handles_kafka_listener_micronaut_groovy);
+    RUN_TEST(handles_kafka_listener_unresolved_or_producer_not_route);
     RUN_TEST(handles_aspnet_csharp);
     RUN_TEST(handles_aspnet_attribute_routes_issue1692);
     RUN_TEST(handles_aspnet_attribute_routes_issue1041);
