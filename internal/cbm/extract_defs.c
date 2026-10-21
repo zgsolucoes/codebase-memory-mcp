@@ -3538,6 +3538,111 @@ static void scan_route_annotations(CBMArena *a, TSNode owner, const char *source
     }
 }
 
+/* First annotation on a JVM method/class (under `modifiers` or a direct child)
+ * named `want`, or, when `want` is NULL, carrying a Micronaut verb name
+ * (@Get, @Post, ...; same names as Nest's) whose HTTP method goes to
+ * `out_verb`. Null node when none. */
+static bool jvm_annotation_matches(CBMArena *a, TSNode node, const char *source,
+                                   const CBMLangSpec *spec, const char *want,
+                                   const char **out_verb) {
+    if (!cbm_kind_in_set(node, spec->decorator_node_types)) {
+        return false;
+    }
+    TSNode name_node = annotation_name_node(node);
+    const char *name = ts_node_is_null(name_node) ? NULL : cbm_node_text(a, name_node, source);
+    if (!name) {
+        return false;
+    }
+    if (want) {
+        return strcmp(name, want) == 0;
+    }
+    *out_verb = nest_decorator_method(name);
+    return *out_verb != NULL;
+}
+
+static TSNode find_jvm_annotation(CBMArena *a, TSNode owner, const char *source,
+                                  const CBMLangSpec *spec, const char *want,
+                                  const char **out_verb) {
+    TSNode none = {0};
+    if (ts_node_is_null(owner)) {
+        return none;
+    }
+    TSNode wrappers[MAX_ATTR_WRAPPERS];
+    int wn = find_jvm_modifiers(owner, spec->language, wrappers, MAX_ATTR_WRAPPERS_MINUS_1);
+    wrappers[wn++] = owner;
+    for (int w = 0; w < wn; w++) {
+        uint32_t cc = ts_node_child_count(wrappers[w]);
+        for (uint32_t ci = 0; ci < cc; ci++) {
+            TSNode child = ts_node_child(wrappers[w], ci);
+            if (jvm_annotation_matches(a, child, source, spec, want, out_verb)) {
+                return child;
+            }
+        }
+    }
+    return none;
+}
+
+/* The path a Micronaut @Controller/@Get/... annotation carries: a rooted
+ * string anywhere in the arguments, else a relative positional first
+ * argument ("{id}"). Named attributes such as produces = "a/b" never count. */
+static const char *micronaut_annotation_path(CBMArena *a, TSNode annotation, const char *source) {
+    TSNode args = annotation_args_node(annotation);
+    if (ts_node_is_null(args)) {
+        return NULL;
+    }
+    const char *path = extract_route_path_from_args(a, args, source, false);
+    if (path || ts_node_named_child_count(args) == 0) {
+        return path;
+    }
+    TSNode first = ts_node_named_child(args, 0);
+    /* Kotlin wraps each argument in value_argument; a named one has 2 children. */
+    if (strcmp(ts_node_type(first), "value_argument") == 0 &&
+        ts_node_named_child_count(first) == 1) {
+        first = ts_node_named_child(first, 0);
+    }
+    return route_path_from_string_node(a, first, source, true);
+}
+
+static const char *join_route_paths(CBMArena *a, const char *prefix, const char *path);
+
+/* Micronaut: a verb annotation on a method of a @Controller class. The same
+ * verbs on a @Client interface describe outbound calls, so they need the
+ * @Controller. An RFC 6570 query template ("{?max}", "{&x}") is not part of
+ * the route and is cut off. */
+static void micronaut_action_route(CBMArena *a, TSNode method_node, TSNode class_node,
+                                   CBMLanguage lang, const char *source, const CBMLangSpec *spec,
+                                   const char **out_path, const char **out_method) {
+    if (*out_path ||
+        (lang != CBM_LANG_JAVA && lang != CBM_LANG_KOTLIN && lang != CBM_LANG_GROOVY)) {
+        return;
+    }
+    const char *verb = NULL;
+    TSNode verb_ann = find_jvm_annotation(a, method_node, source, spec, NULL, &verb);
+    if (ts_node_is_null(verb_ann)) {
+        return;
+    }
+    TSNode ctl = find_jvm_annotation(a, class_node, source, spec, "Controller", NULL);
+    if (ts_node_is_null(ctl)) {
+        return;
+    }
+    const char *prefix = micronaut_annotation_path(a, ctl, source);
+    const char *path =
+        join_route_paths(a, prefix ? prefix : "/", micronaut_annotation_path(a, verb_ann, source));
+    const char *query = strstr(path, "{?");
+    if (!query) {
+        query = strstr(path, "{&");
+    }
+    if (query) {
+        size_t n = (size_t)(query - path);
+        while (n > SKIP_CHAR && path[n - SKIP_CHAR] == '/') {
+            n--;
+        }
+        path = n ? cbm_arena_strndup(a, path, n) : "/";
+    }
+    *out_path = path;
+    *out_method = verb;
+}
+
 static bool extract_route_from_annotations(CBMArena *a, TSNode func_node, const char *source,
                                            const CBMLangSpec *spec, const char **out_path,
                                            const char **out_method) {
@@ -8813,6 +8918,8 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
         const char *prefix = spring_class_route_prefix(a, class_node, ctx->source, spec);
         def.route_path = join_route_paths(a, prefix, def.route_path);
     }
+    micronaut_action_route(a, child, class_node, ctx->language, ctx->source, spec, &def.route_path,
+                           &def.route_method);
     if (def.route_path && (ctx->language == CBM_LANG_TYPESCRIPT || ctx->language == CBM_LANG_TSX)) {
         /* NestJS: a verb decorator only routes inside a @Controller class. */
         const char *prefix = nest_class_route_prefix(a, class_node, ctx->source);

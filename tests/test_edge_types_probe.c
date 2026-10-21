@@ -826,6 +826,77 @@ TEST(handles_jaxrs_groovy) {
     PASS();
 }
 
+/* Micronaut (Java) — the verb is the annotation name (@Get, @Post, ...) and
+ * the class-level @Controller value prefixes it. Paths may be relative
+ * ("{id}") and may carry an RFC 6570 query template ("{?max}"), which is
+ * not part of the route. */
+TEST(handles_micronaut_java) {
+    static const char *routes[] = {"/books", "/books/{id}", "/books", NULL}; /* GET + POST */
+    static const EtFile f[] = {
+        {"BookController.java",
+         "package com.example;\n\n"
+         "import io.micronaut.http.annotation.*;\n\n"
+         "@Controller(\"/books\")\npublic class BookController {\n"
+         "    @Get(\"{?max}\")\n"
+         "    public String list() {\n"
+         "        return \"books\";\n    }\n\n"
+         "    @Get(\"/{id}\")\n"
+         "    public String show(int id) {\n"
+         "        return \"book\";\n    }\n\n"
+         "    @Post\n"
+         "    public String save() {\n"
+         "        return \"saved\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 3));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Micronaut (Groovy) — same contract with Groovy's single-quoted strings. */
+TEST(handles_micronaut_groovy) {
+    static const char *routes[] = {"/organizacoes", "/organizacoes/{id}", /* GET + PUT */
+                                   "/organizacoes/{id}", "/organizacoes/{id}/documentos", NULL};
+    static const EtFile f[] = {
+        {"OrganizacaoController.groovy",
+         "package com.example\n\n"
+         "import io.micronaut.http.annotation.*\n\n"
+         "@Controller('/organizacoes')\nclass OrganizacaoController {\n"
+         "    @Get('{?filtros*}')\n"
+         "    List listar() {\n"
+         "        []\n    }\n\n"
+         "    @Get('/{id}')\n"
+         "    Map buscar(Long id) {\n"
+         "        [:]\n    }\n\n"
+         "    @Put('/{id}')\n"
+         "    Map atualizar(Long id) {\n"
+         "        [:]\n    }\n\n"
+         "    @Post('/{id}/documentos')\n"
+         "    Map anexar(Long id) {\n"
+         "        [:]\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 4));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Negative control: Micronaut's declarative HTTP client uses the same verb
+ * annotations on a @Client interface. Those are outbound calls, not
+ * endpoints this service serves, so no Route may form. */
+TEST(handles_micronaut_client_not_route) {
+    static const EtFile f[] = {
+        {"BookClient.java",
+         "package com.example;\n\n"
+         "import io.micronaut.http.annotation.Get;\n"
+         "import io.micronaut.http.client.annotation.Client;\n\n"
+         "@Client(\"/books\")\npublic interface BookClient {\n"
+         "    @Get(\"/{id}\")\n"
+         "    String show(int id);\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, f, 1);
+    int got = store ? cbm_store_count_edges_by_type(store, lp.project, "HANDLES") : -1;
+    et_cleanup(&lp, store);
+    ASSERT_EQ(got, 0);
+    PASS();
+}
+
 /* ASP.NET Minimal API (C#) — route registration via static MapGet/MapPost calls
  * with identifier handlers, under a Microsoft/AspNetCore path so the resolved
  * callee QN carries the "MapGet"/"Microsoft.AspNetCore" route-reg substrings.
@@ -2917,6 +2988,9 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_jaxrs_scala);
     RUN_TEST(handles_spring_groovy);
     RUN_TEST(handles_jaxrs_groovy);
+    RUN_TEST(handles_micronaut_java);
+    RUN_TEST(handles_micronaut_groovy);
+    RUN_TEST(handles_micronaut_client_not_route);
     RUN_TEST(handles_aspnet_csharp);
     RUN_TEST(handles_aspnet_attribute_routes_issue1692);
     RUN_TEST(handles_aspnet_attribute_routes_issue1041);
