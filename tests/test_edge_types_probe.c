@@ -813,6 +813,66 @@ TEST(handles_jaxrs_java_interface_with_own_path_not_doubled) {
          "    public String get(String id) {\n"
          "        return id;\n    }\n}\n"}};
     ASSERT_TRUE(et_routes_exact(f, 2, routes));
+/* Grails: the default URL mapping "/$controller/$action?/$id?" serves every
+ * public method of a *Controller under grails-app/controllers, so
+ * ExecucaoController.status is reachable as /execucao/status and
+ * /execucao/status/<id> -- the paths Grails REST clients call. Private
+ * methods and classes outside grails-app/controllers are not actions. */
+TEST(handles_grails_controller_convention_routes) {
+    static const char *routes[] = {"/execucao/status", "/execucao/status/{id}", NULL};
+    static const EtFile f[] = {
+        {"grails-app/controllers/com/example/ExecucaoController.groovy",
+         "package com.example\n\n"
+         "class ExecucaoController {\n"
+         "    def status(Long id) {\n"
+         "        render id\n    }\n\n"
+         "    private def ajuda() {\n"
+         "        1\n    }\n}\n"},
+        {"src/main/groovy/com/example/OutroController.groovy",
+         "package com.example\n\n"
+         "class OutroController {\n"
+         "    def lista() {\n"
+         "        []\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, false, "__route__ANY__/execucao/status/{}"));
+    PASS();
+}
+
+/* Grails UrlMappings: an explicit mapping names its controller and action,
+ * in the verb form (`get "/api/x/$id"(controller:, action:)`, typed) and the
+ * plain form (`"/x/$id/y"(controller:, action:)`, any method). Each forms a
+ * Route handled by that controller method; "$controller" patterns are the
+ * default mapping, and the convention routes of every action remain. */
+TEST(handles_grails_url_mappings) {
+    static const char *routes[] = {"/api/billingfiles/{billingFileId}",
+                                   "/fluxo/{id}/summary",
+                                   "/billingFile/findById",
+                                   "/billingFile/findById/{id}",
+                                   "/fluxo/summaryFluxo",
+                                   "/fluxo/summaryFluxo/{id}",
+                                   NULL};
+    static const EtFile f[] = {
+        {"grails-app/controllers/com/example/UrlMappings.groovy",
+         "package com.example\n\n"
+         "class UrlMappings {\n"
+         "    static mappings = {\n"
+         "        \"/$controller/$action?/$id?(.$format)?\" {}\n"
+         "        get \"/api/billingfiles/$billingFileId(.$format)?\"(controller: 'billingFile',"
+         " action: 'findById', version: '1.0')\n"
+         "        \"/fluxo/${id}/summary\"(controller: 'fluxo', action: 'summaryFluxo')\n"
+         "        \"/\"(view: '/index')\n"
+         "    }\n}\n"},
+        {"grails-app/controllers/com/example/BillingFileController.groovy",
+         "package com.example\n\n"
+         "class BillingFileController {\n"
+         "    def findById(Long billingFileId) {\n"
+         "        render billingFileId\n    }\n}\n"},
+        {"grails-app/controllers/com/example/FluxoController.groovy",
+         "package com.example\n\n"
+         "class FluxoController {\n"
+         "    def summaryFluxo(Long id) {\n"
+         "        render id\n    }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact_mode(f, 3, routes, false, "__route__GET__/api/billingfiles/{}"));
     PASS();
 }
 
@@ -3275,6 +3335,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_jaxrs_java_interface_verbs_impl_path);
     RUN_TEST(handles_spring_java_interface_mapping_impl_prefix);
     RUN_TEST(handles_jaxrs_java_interface_with_own_path_not_doubled);
+    RUN_TEST(handles_grails_controller_convention_routes);
+    RUN_TEST(handles_grails_url_mappings);
     RUN_TEST(handles_spring_java_relative_string_not_route);
     RUN_TEST(handles_jaxrs_scala);
     RUN_TEST(handles_spring_groovy);

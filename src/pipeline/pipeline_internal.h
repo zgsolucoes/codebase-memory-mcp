@@ -1220,6 +1220,10 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * have url_path in properties but point to library functions instead of routes.
  * Re-targets these edges to Route nodes for cross-service traversal. */
 void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
+/* Routes for the literal controller/action mappings of Grails UrlMappings.groovy
+ * files (read from repo_path), replacing the HTTP_CALLS the mapping literals
+ * formed. Runs after cbm_pipeline_create_route_nodes. */
+void cbm_pipeline_grails_mapping_routes(cbm_gbuf_t *gb, const char *repo_path);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 
