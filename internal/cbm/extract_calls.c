@@ -2911,6 +2911,21 @@ static const char *extract_positional_url(CBMExtractCtx *ctx, TSNode arg, const 
     return NULL;
 }
 
+/* JVM `send(Owner.NAME, ..)` (first argument): a topic from a shared constants class is
+ * keyed by its symbol, as the consumer's annotation keys it (extract_defs.c);
+ * the pipeline forms no HTTP edge from it, a symbol is not a URL. */
+static const char *jvm_constant_topic_arg(CBMExtractCtx *ctx, TSNode arg, const char *ak,
+                                          uint32_t ai) {
+    CBMLanguage lang = ctx->language;
+    if (ai != 0 || (lang != CBM_LANG_JAVA && lang != CBM_LANG_KOTLIN && lang != CBM_LANG_GROOVY) ||
+        (strcmp(ak, "field_access") != 0 && strcmp(ak, "dotted_identifier") != 0 &&
+         strcmp(ak, "navigation_expression") != 0)) {
+        return NULL;
+    }
+    char *ref = cbm_node_text(ctx->arena, arg, ctx->source);
+    return cbm_is_jvm_constant_ref(ref) ? ref : NULL;
+}
+
 // Extract URL/topic from keyword or positional args.
 static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args,
                                             const char *callee_name) {
@@ -2973,6 +2988,11 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args,
                     return val;
                 }
             }
+        }
+
+        const char *symbol = jvm_constant_topic_arg(ctx, arg, ak, ai);
+        if (symbol) {
+            return symbol;
         }
 
         if (ai < MAX_POSITIONAL_SCAN) {

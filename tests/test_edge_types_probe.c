@@ -1007,9 +1007,11 @@ TEST(async_calls_micronaut_kafka_client_topic_constant_java) {
     PASS();
 }
 
-/* Negative control: a constant of another class is not resolved (its
- * value lives elsewhere), and must not borrow a same-named local field. */
-TEST(handles_kafka_listener_foreign_constant_not_route) {
+/* A constant of another class (usually a shared *-client library) keys
+ * the route by its symbol, so a producer sending the same symbol matches
+ * across repos; it must not borrow a same-named local field's value. */
+TEST(handles_kafka_listener_foreign_constant_symbolic) {
+    static const char *routes[] = {"Topicos.EVENTO", NULL};
     static const EtFile f[] = {
         {"OtherConsumer.java",
          "package com.example;\n\n"
@@ -1017,7 +1019,43 @@ TEST(handles_kafka_listener_foreign_constant_not_route) {
          "    private static final String EVENTO = \"local.topic\";\n\n"
          "    @KafkaListener(topics = Topicos.EVENTO)\n"
          "    public void onEvento(String msg) {\n    }\n}\n"}};
-    ASSERT_EQ(et_handles_count(f, 1), 0);
+    ASSERT_TRUE(et_edge_present(f, 1, "HANDLES", 1));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Producer side of the symbolic key: kafkaTemplate.send(Owner.NAME, ..)
+ * targets the same `__route__kafka__Owner.NAME` a consumer of that
+ * constant handles. */
+TEST(async_calls_kafka_template_symbolic_topic) {
+    static const char *routes[] = {"BillsReviewerTopics.BATCH_SUBMITTED", NULL};
+    static const EtFile f[] = {
+        {"events/Notifier.java",
+         "package events;\n\n"
+         "public class Notifier {\n"
+         "    KafkaTemplate<String, String> kafkaTemplate;\n\n"
+         "    void notify(String id) {\n"
+         "        kafkaTemplate.send(BillsReviewerTopics.BATCH_SUBMITTED, id);\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 1, "ASYNC_CALLS", 1));
+    ASSERT_TRUE(et_routes_exact(f, 1, routes));
+    PASS();
+}
+
+/* Negative control: a constant reference is not a URL, so an HTTP client
+ * call with one forms no HTTP_CALLS edge. */
+TEST(http_calls_constant_ref_not_url) {
+    static const EtFile f[] = {
+        {"client/OrderClient.java",
+         "package client;\n\n"
+         "public class OrderClient {\n"
+         "    RestTemplate restTemplate;\n\n"
+         "    Object fetchOrders() {\n"
+         "        return restTemplate.getForObject(Urls.ORDERS, Object.class);\n    }\n}\n"}};
+    EtProj lp;
+    cbm_store_t *store = et_index_files(&lp, f, 1);
+    int got = store ? cbm_store_count_edges_by_type(store, lp.project, "HTTP_CALLS") : -1;
+    et_cleanup(&lp, store);
+    ASSERT_EQ(got, 0);
     PASS();
 }
 
@@ -3172,7 +3210,9 @@ SUITE(edge_types_probe) {
     RUN_TEST(async_calls_micronaut_kafka_client_groovy);
     RUN_TEST(handles_kafka_listener_topic_constant_java);
     RUN_TEST(async_calls_micronaut_kafka_client_topic_constant_java);
-    RUN_TEST(handles_kafka_listener_foreign_constant_not_route);
+    RUN_TEST(handles_kafka_listener_foreign_constant_symbolic);
+    RUN_TEST(async_calls_kafka_template_symbolic_topic);
+    RUN_TEST(http_calls_constant_ref_not_url);
     RUN_TEST(handles_aspnet_csharp);
     RUN_TEST(handles_aspnet_attribute_routes_issue1692);
     RUN_TEST(handles_aspnet_attribute_routes_issue1041);
