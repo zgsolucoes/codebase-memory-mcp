@@ -525,6 +525,190 @@ static void ensure_decorator_routes(cbm_gbuf_t *gb) {
     }
 }
 
+/* Class-level route prefix of a class node, read from its stored decorator
+ * texts: JAX-RS @Path("x") (relative allowed) or a slash-rooted string of
+ * Spring @RequestMapping. Returns true when the class carries either
+ * annotation; out gets the rooted prefix, or "" when its value is not a
+ * string literal.
+ * shortcut: literal values only (a constant prefix leaves out ""), upgrade
+ * when extraction stores the resolved class prefix. */
+static bool class_route_prefix(const cbm_gbuf_node_t *cls, char *out, size_t out_sz) {
+    out[0] = '\0';
+    const char *p =
+        cls && cls->properties_json ? strstr(cls->properties_json, "\"decorators\":[") : NULL;
+    if (!p) {
+        return false;
+    }
+    p += strlen("\"decorators\":[");
+    while (*p == '"') {
+        /* one JSON string element: unescape \" and \\ into dec */
+        char dec[CBM_SZ_256];
+        size_t n = 0;
+        for (p++; *p && *p != '"'; p++) {
+            if (*p == '\\' && p[1]) {
+                p++;
+            }
+            if (n + 1 < sizeof(dec)) {
+                dec[n++] = *p;
+            }
+        }
+        dec[n] = '\0';
+        p += (*p == '"') ? 1 : 0;
+        p += (*p == ',') ? 1 : 0;
+
+        const char *open = strchr(dec, '(');
+        const char *name = dec[0] == '@' ? dec + 1 : dec;
+        const char *dot = NULL;
+        for (const char *q = name; open && q < open; q++) {
+            dot = (*q == '.') ? q : dot;
+        }
+        name = dot ? dot + 1 : name;
+        size_t nlen = open ? (size_t)(open - name) : strlen(name);
+        bool jaxrs = nlen == strlen("Path") && strncmp(name, "Path", nlen) == 0;
+        bool spring =
+            nlen == strlen("RequestMapping") && strncmp(name, "RequestMapping", nlen) == 0;
+        if (!jaxrs && !spring) {
+            continue;
+        }
+        const char *q = open ? strpbrk(open, "'\"") : NULL;
+        const char *end = q ? strchr(q + 1, *q) : NULL;
+        if (end && (jaxrs || q[1] == '/') && (size_t)(end - q) + 1 < out_sz) {
+            size_t len = (size_t)(end - q - 1);
+            size_t off = (q[1] == '/') ? 0 : 1;
+            out[0] = '/';
+            memcpy(out + off, q + 1, len);
+            out[off + len] = '\0';
+        }
+        return true;
+    }
+    return false;
+}
+
+/* Join a class prefix and a method route path: "/a" + "/b" -> "/a/b",
+ * "/a/" + "/" -> "/a". */
+static void join_class_prefix(const char *prefix, const char *path, char *out, size_t out_sz) {
+    size_t plen = strlen(prefix);
+    while (plen > 1 && prefix[plen - 1] == '/') {
+        plen--;
+    }
+    while (*path == '/') {
+        path++;
+    }
+    (void)snprintf(out, out_sz, "%.*s%s%s", (int)plen, prefix, path[0] ? "/" : "", path);
+}
+
+typedef struct {
+    int64_t impl_id;
+    int64_t decl_id;
+} iface_override_t;
+
+/* Mount one interface-declared route on the implementing class's prefix.
+ * Writes the replaced Route QN into stale_qn (or "") for the caller to drop
+ * once no edge uses it. */
+static void mount_one_interface_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *impl,
+                                      const cbm_gbuf_node_t *decl, char *stale_qn,
+                                      size_t stale_sz) {
+    stale_qn[0] = '\0';
+    char path[CBM_SZ_256];
+    char method[CBM_SZ_16] = "ANY";
+    char decl_cls_qn[CBM_SZ_512];
+    char impl_cls_qn[CBM_SZ_512];
+    if (!extract_json_prop(decl->properties_json, "route_path", path, sizeof(path)) ||
+        path[0] != '/' ||
+        !extract_json_prop(decl->properties_json, "parent_class", decl_cls_qn,
+                           sizeof(decl_cls_qn)) ||
+        !extract_json_prop(impl->properties_json, "parent_class", impl_cls_qn,
+                           sizeof(impl_cls_qn))) {
+        return;
+    }
+    extract_json_prop(decl->properties_json, "route_method", method, sizeof(method));
+    char prefix[CBM_SZ_256];
+    if (class_route_prefix(cbm_gbuf_find_by_qn(gb, decl_cls_qn), prefix, sizeof(prefix)) ||
+        !class_route_prefix(cbm_gbuf_find_by_qn(gb, impl_cls_qn), prefix, sizeof(prefix)) ||
+        !prefix[0]) {
+        return; /* the interface routes itself, or the implementation adds no prefix */
+    }
+    char full[CBM_SZ_512];
+    join_class_prefix(prefix, path, full, sizeof(full));
+
+    char old_qn[CBM_ROUTE_QN_SIZE];
+    char new_qn[CBM_ROUTE_QN_SIZE];
+    char cpath[CBM_SZ_512];
+    (void)snprintf(old_qn, sizeof(old_qn), "__route__%s__%s", method,
+                   cbm_route_canon_path(path, cpath, sizeof(cpath)));
+    (void)snprintf(new_qn, sizeof(new_qn), "__route__%s__%s", method,
+                   cbm_route_canon_path(full, cpath, sizeof(cpath)));
+    char rprops[CBM_SZ_256];
+    (void)snprintf(rprops, sizeof(rprops), "{\"method\":\"%s\",\"source\":\"decorator\"}", method);
+    int64_t route_id = cbm_gbuf_upsert_node(gb, "Route", full, new_qn,
+                                            impl->file_path ? impl->file_path : "", 0, 0, rprops);
+    char esc_h[CBM_SZ_512];
+    char hprops[CBM_SZ_1K];
+    cbm_json_escape(esc_h, sizeof(esc_h), impl->qualified_name ? impl->qualified_name : "");
+    (void)snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
+    cbm_gbuf_insert_edge(gb, impl->id, route_id, "HANDLES", hprops);
+
+    const cbm_gbuf_node_t *old = cbm_gbuf_find_by_qn(gb, old_qn);
+    const cbm_gbuf_edge_t **handles = NULL;
+    int hcount = 0;
+    if (old &&
+        cbm_gbuf_find_edges_by_source_type(gb, decl->id, "HANDLES", &handles, &hcount) == 0) {
+        for (int i = 0; i < hcount; i++) {
+            if (handles[i]->target_id == old->id) {
+                const cbm_gbuf_edge_t *victim = handles[i];
+                cbm_gbuf_delete_edges(gb, &victim, 1);
+                break;
+            }
+        }
+        (void)snprintf(stale_qn, stale_sz, "%s", old_qn);
+    }
+}
+
+/* Phase 2c: routes declared on an interface whose class-level prefix sits
+ * on the implementation (JAX-RS resource/impl split, Spring API interface).
+ * The interface alone yields the bare method path ("/{id}"); the served route
+ * is the implementing class's @Path/@RequestMapping prefix plus that path,
+ * handled by the implementing method (OVERRIDE edge from pass_semantic). */
+static void mount_interface_routes(cbm_gbuf_t *gb) {
+    const cbm_gbuf_edge_t **ovr = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_edges_by_type(gb, "OVERRIDE", &ovr, &count) != 0 || count == 0) {
+        return;
+    }
+    /* Copy the pairs first: the inserts and deletes below edit the edge index. */
+    iface_override_t *pairs = cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)count * sizeof(*pairs));
+    if (!pairs) {
+        return;
+    }
+    int n = 0;
+    for (int i = 0; i < count; i++) {
+        const cbm_gbuf_node_t *decl = cbm_gbuf_find_by_id(gb, ovr[i]->target_id);
+        if (decl && decl->properties_json && strstr(decl->properties_json, "\"route_path\"")) {
+            pairs[n++] = (iface_override_t){ovr[i]->source_id, ovr[i]->target_id};
+        }
+    }
+    int mounted = 0;
+    for (int i = 0; i < n; i++) {
+        const cbm_gbuf_node_t *impl = cbm_gbuf_find_by_id(gb, pairs[i].impl_id);
+        const cbm_gbuf_node_t *decl = cbm_gbuf_find_by_id(gb, pairs[i].decl_id);
+        char stale[CBM_ROUTE_QN_SIZE];
+        if (!impl || !decl || !impl->properties_json) {
+            continue;
+        }
+        mount_one_interface_route(gb, impl, decl, stale, sizeof(stale));
+        if (stale[0]) {
+            (void)cbm_gbuf_delete_edgeless_qn(gb, "Route", stale);
+            mounted++;
+        }
+    }
+    cbm_free(CBM_MEM_CLASS_OTHER, pairs);
+    if (mounted > 0) {
+        char buf[CBM_SZ_16];
+        snprintf(buf, sizeof(buf), "%d", mounted);
+        cbm_log_info("pass.interface_routes", "mounted", buf);
+    }
+}
+
 /* Phase 2b: Connect prefix Routes to decorator handler Functions.
  * For each prefix Route (__route__ANY__/path), find the CALLS edge leading to it
  * (from the registering file), derive the service directory, then find decorator
@@ -1301,6 +1485,10 @@ void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb) {
     /* Phase 2a: ensure all functions with route_path have Route+HANDLES.
      * Handles incremental mode where unchanged files don't re-extract. */
     ensure_decorator_routes(gb);
+
+    /* Phase 2c: prefix interface-declared routes with the implementing
+     * class's @Path/@RequestMapping (needs the OVERRIDE edges). */
+    mount_interface_routes(gb);
 
     /* Phase 2b: connect prefix Routes to decorator handler Functions.
      * Must run BEFORE match_infra_routes so infra matching can find

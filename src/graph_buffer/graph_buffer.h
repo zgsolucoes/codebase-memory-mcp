@@ -130,6 +130,9 @@ int cbm_gbuf_delete_unreferenced(cbm_gbuf_t *gb, const char *label, const char *
  * the file-less one whose last edge went with its files, as a full index
  * never makes it. */
 int cbm_gbuf_delete_edgeless(cbm_gbuf_t *gb, const char *label);
+/* Delete the `label` node with qualified name `qn` when no edge touches it
+ * (file or not); returns 1 when deleted, 0 when it still has edges. */
+int cbm_gbuf_delete_edgeless_qn(cbm_gbuf_t *gb, const char *label, const char *qn);
 
 /* Bulk-load all nodes and edges for a project from an existing SQLite DB
  * into this graph buffer. Returns 0 on success. */
