@@ -1114,6 +1114,33 @@ TEST(cross_repo_escapes_quoted_function_names) {
     PASS();
 }
 
+/* The Angular client of the same operation is ReviewExecutionService: the
+ * class suffix (Api / Service) is not part of the operation's identity. */
+TEST(cross_repo_openapi_angular_service_binds_server_route) {
+    cross_repo_fixture_t fixture;
+    bool setup = cross_repo_fixture_begin(&fixture) && cross_repo_seed_openapi(&fixture);
+    char path[512];
+    cbm_store_t *st = NULL;
+    setup = setup && cross_repo_project_path(&fixture, "oa-consumer", path, sizeof(path)) &&
+            (st = cbm_store_open_path(path)) != NULL &&
+            sqlite3_exec(cbm_store_get_db(st),
+                         "UPDATE edges SET properties = replace(properties, "
+                         "'ReviewExecutionApi', 'ReviewExecutionService')",
+                         NULL, NULL, NULL) == SQLITE_OK;
+    cbm_store_close(st);
+    if (!setup) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed angular openapi fixture");
+    }
+    const char *all[] = {"*"};
+    cbm_cross_repo_result_t result = cbm_cross_repo_match("oa-consumer", all, 1);
+    cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
+    ASSERT_FALSE(result.failed);
+    ASSERT_EQ(result.http_edges, 1);
+    PASS();
+}
+
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
@@ -1128,6 +1155,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_matches_calls_past_4096_rows);
     RUN_TEST(cross_repo_escapes_quoted_function_names);
     RUN_TEST(cross_repo_openapi_client_call_binds_server_route);
+    RUN_TEST(cross_repo_openapi_angular_service_binds_server_route);
     RUN_TEST(cross_repo_all_placeholder_route_does_not_match_any_url);
     RUN_TEST(cross_repo_template_with_literal_segment_matches_concrete_url);
     RUN_TEST(cross_repo_propagates_delete_failure);

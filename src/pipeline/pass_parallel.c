@@ -3485,7 +3485,8 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
 
         /* A generated OpenAPI client call names its operation, not a URL.
          * MUST match pass_calls.c. */
-        (void)cbm_pipeline_openapi_client_call(ws->local_edge_buf, source_node, call, &res);
+        (void)cbm_pipeline_openapi_client_call(ws->local_edge_buf, rc->main_gbuf, source_node, call,
+                                               &res);
         /* A call that starts another program (subprocess.run, exec.Command,
          * posix_spawn): a SPAWNS edge to its Process node instead of a CALLS
          * edge. `res` holds the LSP answer when there is one, as the

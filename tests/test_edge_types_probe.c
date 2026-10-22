@@ -2272,6 +2272,63 @@ TEST(http_calls_openapi_generated_client) {
     PASS();
 }
 
+/* The generated client is known by its declared type, not the variable's
+ * name: `BillingApi faturamento` then `faturamento.reviewFiles(dto)`. A class
+ * the project defines itself (LocalApi) is not a generated client. */
+TEST(http_calls_openapi_client_by_declared_type_groovy) {
+    static const EtFile f[] = {
+        {"src/main/groovy/com/example/Envio.groovy",
+         "package com.example\n\n"
+         "import com.example.client.api.BillingApi\n\n"
+         "class Envio {\n"
+         "    private final BillingApi faturamento\n"
+         "    LocalApi local\n\n"
+         "    void enviar(Object dto) {\n"
+         "        faturamento.reviewFiles(dto)\n"
+         "        local.reviewFiles(dto)\n"
+         "    }\n}\n"},
+        {"src/main/groovy/com/example/LocalApi.groovy",
+         "package com.example\n\n"
+         "class LocalApi {\n"
+         "    void reviewFiles(Object dto) {}\n}\n"}};
+    static const char *routes[] = {"BillingApi.reviewFiles", NULL};
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, false, "__route__OPENAPI__BillingApi.reviewFiles"));
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, true, "__route__OPENAPI__BillingApi.reviewFiles"));
+    PASS();
+}
+
+/* Angular (openapi-generator typescript-angular): the client is a
+ * `<Tag>Service` injected through the constructor (or inject()), called as
+ * this._userService.findUserByUsername(...). The project's own services
+ * (LocalService, defined in the repo) are not generated clients. */
+TEST(http_calls_openapi_client_angular) {
+    static const EtFile f[] = {
+        {"src/app/app.component.ts",
+         "import { Component, inject } from '@angular/core';\n"
+         "import { UserService, CampaignService } from '@zg-angular/settings-repository-client';\n"
+         "import { LocalService } from './local.service';\n\n"
+         "@Component({ selector: 'app-root', template: '' })\n"
+         "export class AppComponent {\n"
+         "  private campanhas = inject(CampaignService);\n"
+         "  constructor(private readonly _userService: UserService,\n"
+         "              private local: LocalService) {}\n\n"
+         "  carregar(name: string) {\n"
+         "    this._userService.findUserByUsername(name).subscribe();\n"
+         "    this.campanhas.getIndex(1);\n"
+         "    this.local.findUserByUsername(name);\n"
+         "  }\n}\n"},
+        {"src/app/local.service.ts",
+         "export class LocalService {\n"
+         "  findUserByUsername(name: string) { return name; }\n}\n"}};
+    static const char *routes[] = {"UserService.findUserByUsername", "CampaignService.getIndex",
+                                   NULL};
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, false,
+                                     "__route__OPENAPI__UserService.findUserByUsername"));
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, true,
+                                     "__route__OPENAPI__UserService.findUserByUsername"));
+    PASS();
+}
+
 TEST(http_calls_resttemplate_java) {
     static const EtFile f[] = {
         {"RestTemplate.java",
@@ -3448,6 +3505,8 @@ SUITE(edge_types_probe) {
     RUN_TEST(http_calls_nethttp_go);
     RUN_TEST(http_calls_zg_rest_client_groovy);
     RUN_TEST(http_calls_openapi_generated_client);
+    RUN_TEST(http_calls_openapi_client_by_declared_type_groovy);
+    RUN_TEST(http_calls_openapi_client_angular);
     RUN_TEST(http_calls_resttemplate_java);
     RUN_TEST(http_calls_resttemplate_groovy);
     RUN_TEST(async_calls_kafka_template_groovy);

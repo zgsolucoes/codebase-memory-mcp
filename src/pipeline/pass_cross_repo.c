@@ -60,7 +60,7 @@ typedef struct {
     bool cancellation_observed;
     bool mutated;
     /* Every project of the run, and the OpenAPI operations their API
-     * descriptions declare ("<tag>api.<operationId>" -> "METHOD path"), read
+     * descriptions declare ("<tag>.<operationId>" -> "METHOD path"), read
      * the first time a generated-client call needs them. */
     char *const *projects;
     int project_count;
@@ -711,12 +711,12 @@ static bool call_served_locally(cbm_store_t *src_store, struct sqlite3 *src_db,
     return resolve_route_handler(src_store, method, curl, &local, failed, ctx) != 0;
 }
 
-/* Key of a generated-client operation: the API class name lowercased to its
- * letters and digits ("Review Execution" tag + "Api" and the
- * ReviewExecutionApi class both give "reviewexecutionapi"), "." and the
+/* Key of a generated-client operation: the tag lowercased to its letters and
+ * digits ("Review Execution" tag, ReviewExecutionApi and
+ * ReviewExecutionService classes all give "reviewexecution"), "." and the
  * operationId (the generated method name). */
-static void cr_openapi_key(const char *api, size_t api_len, bool add_api, const char *op, char *out,
-                           size_t out_sz) {
+static void cr_openapi_key(const char *api, size_t api_len, bool client_class, const char *op,
+                           char *out, size_t out_sz) {
     size_t n = 0;
     for (size_t i = 0; i < api_len && n + 1 < out_sz; i++) {
         if (isalnum((unsigned char)api[i])) {
@@ -724,7 +724,18 @@ static void cr_openapi_key(const char *api, size_t api_len, bool add_api, const 
         }
     }
     out[n] = '\0';
-    (void)snprintf(out + n, out_sz - n, "%s.%s", add_api ? "api" : "", op);
+    /* a client class carries its generator's suffix: <tag>Api (Java/Kotlin),
+     * <tag>Service (typescript-angular) */
+    static const char *const suffixes[] = {"service", "api", NULL};
+    for (int i = 0; client_class && suffixes[i]; i++) {
+        size_t sl = strlen(suffixes[i]);
+        if (n > sl && strcmp(out + n - sl, suffixes[i]) == 0) {
+            n -= sl;
+            out[n] = '\0';
+            break;
+        }
+    }
+    (void)snprintf(out + n, out_sz - n, ".%s", op);
 }
 
 static void cr_openapi_free_value(const char *key, void *value, void *ud) {
@@ -765,7 +776,7 @@ static void cr_openapi_load_project(CBMHashTable *ops, const char *project) {
             }
             char key[CBM_SZ_512];
             char val[CBM_SZ_512];
-            cr_openapi_key(tag, strlen(tag), true, op, key, sizeof(key));
+            cr_openapi_key(tag, strlen(tag), false, op, key, sizeof(key));
             (void)snprintf(val, sizeof(val), "%s %s", method, route);
             const char *prev = cbm_ht_get(ops, key);
             if (prev && (!prev[0] || strcmp(prev, val) == 0)) {
@@ -802,7 +813,7 @@ static bool cr_openapi_operation(cr_run_context_t *ctx, const char *url, char *m
         return false;
     }
     char key[CBM_SZ_512];
-    cr_openapi_key(url, (size_t)(dot - url), false, dot + 1, key, sizeof(key));
+    cr_openapi_key(url, (size_t)(dot - url), true, dot + 1, key, sizeof(key));
     const char *val = cbm_ht_get(ctx->openapi_ops, key);
     const char *sp = val ? strchr(val, ' ') : NULL;
     if (!sp || (size_t)(sp - val) >= method_sz) {
