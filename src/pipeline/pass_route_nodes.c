@@ -33,6 +33,7 @@ enum {
 #include <stdint.h>
 #include "graph_buffer/graph_buffer.h"
 #include "foundation/log.h"
+#include "foundation/compat_fs.h" /* cbm_fopen */
 #include "service_patterns.h"  /* cbm_service_pattern_is_http_route_literal */
 #include "helpers.h"           /* cbm_is_test_file */
 #include "discover/discover.h" /* cbm_language_for_filename */
@@ -1365,6 +1366,301 @@ static void create_sveltekit_routes(cbm_gbuf_t *gb) {
         snprintf(b2, sizeof(b2), "%d", ctx.routes_created);
         snprintf(b3, sizeof(b3), "%d", ctx.handles_created);
         cbm_log_info("pass.sveltekit_routes", "files", b1, "routes", b2, "handles", b3);
+    }
+}
+
+/* ── Grails UrlMappings.groovy explicit mappings ──────────────────
+ *
+ *     get "/api/billingfiles/$id"(controller: 'billingFile', action: 'show')
+ *     "/fluxo/$id/summary"(controller: 'fluxo', action: 'summaryFluxo', method: 'GET')
+ *
+ * The Groovy grammar has no node for a string called as a function, so the
+ * mappings are read from the file text. Only mappings naming a literal
+ * controller and action form a Route; "$controller" patterns are the default
+ * mapping (create_grails_convention_routes) and closure forms
+ * (`action = [GET: 'show']`) are skipped.
+ * shortcut: line-start scan of the file text; upgrade to a parse once the
+ * grammar models string-callee calls. */
+
+enum { GM_SOURCE_MAX = 4 * 1024 * 1024 };
+
+/* Read a quoted Groovy string at p ('...' or "..."); returns the char after
+ * the closing quote, or NULL. */
+static const char *gm_quoted(const char *p, char *out, size_t out_sz) {
+    char q = *p;
+    if (q != '\'' && q != '"') {
+        return NULL;
+    }
+    size_t n = 0;
+    for (p++; *p && *p != q && *p != '\n'; p++) {
+        if (n + 1 < out_sz) {
+            out[n++] = *p;
+        }
+    }
+    out[n] = '\0';
+    return *p == q ? p + 1 : NULL;
+}
+
+/* Value of `key: 'v'` inside an argument list [args, end). */
+static bool gm_named_arg(const char *args, const char *end, const char *key, char *out,
+                         size_t out_sz) {
+    size_t klen = strlen(key);
+    for (const char *p = args; p && p + klen < end; p++) {
+        p = strstr(p, key);
+        if (!p || p + klen >= end) {
+            return false;
+        }
+        bool start = p == args || !(isalnum((unsigned char)p[-1]) || p[-1] == '_');
+        const char *q = p + klen;
+        while (q < end && (*q == ' ' || *q == '\t')) {
+            q++;
+        }
+        if (!start || q >= end || *q != ':') {
+            continue;
+        }
+        for (q++; q < end && isspace((unsigned char)*q); q++) {}
+        return q < end && gm_quoted(q, out, out_sz) != NULL && !strchr(out, '$') && out[0];
+    }
+    return false;
+}
+
+/* Grails path template -> route path: "$id"/"${id}" -> "{id}", optional
+ * markers and the "(.$format)?" suffix dropped. */
+static void gm_route_path(const char *raw, char *out, size_t out_sz) {
+    size_t n = 0;
+    for (const char *p = raw; *p && n + 2 < out_sz;) {
+        if (p[0] == '(' && p[1] == '.') { /* (.$format)? */
+            const char *close = strchr(p, ')');
+            p = close ? close + 1 : p + strlen(p);
+            p += (*p == '?') ? 1 : 0;
+            continue;
+        }
+        if (*p == '$') {
+            bool braced = *++p == '{';
+            p += braced ? 1 : 0;
+            out[n++] = '{';
+            while (*p && (isalnum((unsigned char)*p) || *p == '_') && n + 2 < out_sz) {
+                out[n++] = *p++;
+            }
+            p += (braced && *p == '}') ? 1 : 0;
+            p += (*p == '?') ? 1 : 0;
+            out[n++] = '}';
+            continue;
+        }
+        out[n++] = *p++;
+    }
+    out[n] = '\0';
+}
+
+typedef struct {
+    char method[CBM_SZ_16];
+    char path[CBM_SZ_256];
+    char controller[CBM_SZ_128];
+    char action[CBM_SZ_128];
+} gm_mapping_t;
+
+/* Parse the mapping that starts at line start p. Returns the position to
+ * resume scanning from. */
+static const char *gm_parse_mapping(const char *p, gm_mapping_t *m, bool *ok) {
+    static const char *verbs[] = {"get", "post", "put", "delete", "patch", "head", NULL};
+    *ok = false;
+    snprintf(m->method, sizeof(m->method), "ANY");
+    for (int i = 0; verbs[i]; i++) {
+        size_t vl = strlen(verbs[i]);
+        if (strncmp(p, verbs[i], vl) == 0 && (p[vl] == ' ' || p[vl] == '\t')) {
+            for (size_t c = 0; c < vl; c++) {
+                m->method[c] = (char)toupper((unsigned char)verbs[i][c]);
+            }
+            m->method[vl] = '\0';
+            for (p += vl; *p == ' ' || *p == '\t'; p++) {}
+            break;
+        }
+    }
+    char raw[CBM_SZ_256];
+    const char *after = gm_quoted(p, raw, sizeof(raw));
+    if (!after || raw[0] != '/') {
+        return p;
+    }
+    while (*after == ' ' || *after == '\t') {
+        after++;
+    }
+    if (*after != '(') {
+        return after;
+    }
+    const char *args = after + 1;
+    int depth = 1;
+    const char *end = args;
+    for (; *end && depth > 0; end++) {
+        depth += (*end == '(') ? 1 : (*end == ')') ? -1 : 0;
+    }
+    char verb[CBM_SZ_16];
+    if (depth != 0 ||
+        !gm_named_arg(args, end, "controller", m->controller, sizeof(m->controller)) ||
+        !gm_named_arg(args, end, "action", m->action, sizeof(m->action))) {
+        return end;
+    }
+    if (gm_named_arg(args, end, "method", verb, sizeof(verb))) {
+        for (size_t c = 0; verb[c] && c + 1 < sizeof(m->method); c++) {
+            m->method[c] = (char)toupper((unsigned char)verb[c]);
+            m->method[c + 1] = '\0';
+        }
+    }
+    gm_route_path(raw, m->path, sizeof(m->path));
+    *ok = true;
+    return end;
+}
+
+/* The public action `action` of Grails controller `controller` ("billingFile"
+ * -> class BillingFileController), or NULL. */
+static const cbm_gbuf_node_t *gm_find_action(const cbm_gbuf_t *gb, const gm_mapping_t *m) {
+    char cls[CBM_SZ_256];
+    snprintf(cls, sizeof(cls), ".%c%sController", toupper((unsigned char)m->controller[0]),
+             m->controller + 1);
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_name(gb, m->action, &nodes, &count) != 0) {
+        return NULL;
+    }
+    size_t clen = strlen(cls);
+    for (int i = 0; i < count; i++) {
+        char parent[CBM_SZ_512];
+        if (!nodes[i]->label || strcmp(nodes[i]->label, "Method") != 0 ||
+            !extract_json_prop(nodes[i]->properties_json, "parent_class", parent, sizeof(parent))) {
+            continue;
+        }
+        size_t plen = strlen(parent);
+        if (plen >= clen && strcmp(parent + plen - clen, cls) == 0) {
+            return nodes[i];
+        }
+    }
+    return NULL;
+}
+
+static char *gm_read(const char *repo_path, const char *rel) {
+    char path[CBM_SZ_4K];
+    int n = snprintf(path, sizeof(path), "%s/%s", repo_path, rel);
+    FILE *f = (n > 0 && (size_t)n < sizeof(path)) ? cbm_fopen(path, "rb") : NULL;
+    if (!f) {
+        return NULL;
+    }
+    (void)fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    (void)fseek(f, 0, SEEK_SET);
+    char *buf = (size > 0 && size <= GM_SOURCE_MAX)
+                    ? cbm_alloc(CBM_MEM_CLASS_EXTRACT, (size_t)size + SKIP_ONE)
+                    : NULL;
+    if (buf) {
+        size_t nread = fread(buf, SKIP_ONE, (size_t)size, f);
+        buf[nread] = '\0';
+    }
+    (void)fclose(f);
+    return buf;
+}
+
+/* Routes for every literal controller/action mapping of one UrlMappings file. */
+static int gm_file_routes(cbm_gbuf_t *gb, const char *repo_path, const char *rel) {
+    char *src = gm_read(repo_path, rel);
+    if (!src) {
+        return 0;
+    }
+    int created = 0;
+    for (const char *p = src; p && *p;) {
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        gm_mapping_t m;
+        bool ok = false;
+        const char *next = gm_parse_mapping(p, &m, &ok);
+        const cbm_gbuf_node_t *action = ok ? gm_find_action(gb, &m) : NULL;
+        if (action) {
+            char qn[CBM_ROUTE_QN_SIZE];
+            char cpath[CBM_SZ_512];
+            char rprops[CBM_SZ_256];
+            (void)snprintf(qn, sizeof(qn), "__route__%s__%s", m.method,
+                           cbm_route_canon_path(m.path, cpath, sizeof(cpath)));
+            (void)snprintf(rprops, sizeof(rprops),
+                           "{\"method\":\"%s\",\"source\":\"grails_url_mappings\"}", m.method);
+            int64_t rid = cbm_gbuf_upsert_node(gb, "Route", m.path, qn, rel, 0, 0, rprops);
+            char esc_h[CBM_SZ_512];
+            char hprops[CBM_SZ_1K];
+            cbm_json_escape(esc_h, sizeof(esc_h), action->qualified_name);
+            (void)snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
+            cbm_gbuf_insert_edge(gb, action->id, rid, "HANDLES", hprops);
+            created++;
+        }
+        const char *nl = strchr(next > p ? next : p, '\n');
+        p = nl ? nl + 1 : NULL;
+    }
+    cbm_free(CBM_MEM_CLASS_EXTRACT, src);
+    return created;
+}
+
+typedef struct {
+    const char **files;
+    int count;
+    int cap;
+} gm_files_t;
+
+static void gm_collect_file(const cbm_gbuf_node_t *node, void *ud) {
+    gm_files_t *fs = ud;
+    const char *fp = node->file_path;
+    size_t len = fp ? strlen(fp) : 0;
+    static const char tail[] = "UrlMappings.groovy";
+    if (!node->label || strcmp(node->label, "File") != 0 || len < sizeof(tail) - 1 ||
+        strcmp(fp + len - (sizeof(tail) - 1), tail) != 0 || !strstr(fp, "grails-app/") ||
+        fs->count >= fs->cap) {
+        return;
+    }
+    fs->files[fs->count++] = fp;
+}
+
+/* An edge whose source sits in a UrlMappings file: the mapping literals the
+ * URL-argument heuristic read as outgoing HTTP calls. */
+static void gm_collect_false_calls(const cbm_gbuf_t *gb, const cbm_gbuf_edge_t **edges, int n,
+                                   const cbm_gbuf_edge_t **out, int *out_n) {
+    for (int i = 0; i < n; i++) {
+        const cbm_gbuf_node_t *src = cbm_gbuf_find_by_id(gb, edges[i]->source_id);
+        const char *fp = src ? src->file_path : NULL;
+        if (fp && strstr(fp, "grails-app/") && strstr(fp, "UrlMappings")) {
+            out[(*out_n)++] = edges[i];
+        }
+    }
+}
+
+void cbm_pipeline_grails_mapping_routes(cbm_gbuf_t *gb, const char *repo_path) {
+    if (!gb || !repo_path) {
+        return;
+    }
+    enum { GM_MAX_FILES = 64 };
+    const char *files[GM_MAX_FILES];
+    gm_files_t fs = {files, 0, GM_MAX_FILES};
+    cbm_gbuf_foreach_node(gb, gm_collect_file, &fs);
+    if (fs.count == 0) {
+        return;
+    }
+    int created = 0;
+    for (int i = 0; i < fs.count; i++) {
+        created += gm_file_routes(gb, repo_path, fs.files[i]);
+    }
+    const cbm_gbuf_edge_t **calls = NULL;
+    int ncalls = 0;
+    if (cbm_gbuf_find_edges_by_type(gb, "HTTP_CALLS", &calls, &ncalls) == 0 && ncalls > 0) {
+        const cbm_gbuf_edge_t **victims =
+            cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)ncalls * sizeof(*victims));
+        int nv = 0;
+        if (victims) {
+            gm_collect_false_calls(gb, calls, ncalls, victims, &nv);
+            if (nv > 0) {
+                cbm_gbuf_delete_edges(gb, victims, nv);
+                (void)cbm_gbuf_delete_edgeless(gb, "Route");
+            }
+            cbm_free(CBM_MEM_CLASS_OTHER, victims);
+        }
+    }
+    if (created > 0) {
+        char buf[CBM_SZ_16];
+        snprintf(buf, sizeof(buf), "%d", created);
+        cbm_log_info("pass.grails_url_mappings", "routes", buf);
     }
 }
 

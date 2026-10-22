@@ -765,6 +765,44 @@ TEST(handles_grails_controller_convention_routes) {
     PASS();
 }
 
+/* Grails UrlMappings: an explicit mapping names its controller and action,
+ * in the verb form (`get "/api/x/$id"(controller:, action:)`, typed) and the
+ * plain form (`"/x/$id/y"(controller:, action:)`, any method). Each forms a
+ * Route handled by that controller method; "$controller" patterns are the
+ * default mapping, and the convention routes of every action remain. */
+TEST(handles_grails_url_mappings) {
+    static const char *routes[] = {"/api/billingfiles/{billingFileId}",
+                                   "/fluxo/{id}/summary",
+                                   "/billingFile/findById",
+                                   "/billingFile/findById/{id}",
+                                   "/fluxo/summaryFluxo",
+                                   "/fluxo/summaryFluxo/{id}",
+                                   NULL};
+    static const EtFile f[] = {
+        {"grails-app/controllers/com/example/UrlMappings.groovy",
+         "package com.example\n\n"
+         "class UrlMappings {\n"
+         "    static mappings = {\n"
+         "        \"/$controller/$action?/$id?(.$format)?\" {}\n"
+         "        get \"/api/billingfiles/$billingFileId(.$format)?\"(controller: 'billingFile',"
+         " action: 'findById', version: '1.0')\n"
+         "        \"/fluxo/${id}/summary\"(controller: 'fluxo', action: 'summaryFluxo')\n"
+         "        \"/\"(view: '/index')\n"
+         "    }\n}\n"},
+        {"grails-app/controllers/com/example/BillingFileController.groovy",
+         "package com.example\n\n"
+         "class BillingFileController {\n"
+         "    def findById(Long billingFileId) {\n"
+         "        render billingFileId\n    }\n}\n"},
+        {"grails-app/controllers/com/example/FluxoController.groovy",
+         "package com.example\n\n"
+         "class FluxoController {\n"
+         "    def summaryFluxo(Long id) {\n"
+         "        render id\n    }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact_mode(f, 3, routes, false, "__route__GET__/api/billingfiles/{}"));
+    PASS();
+}
+
 /* Negative control: the relative-template acceptance is scoped to JAX-RS
  * @Path. A slash-less string on a Spring mapping annotation is still not read
  * as a route path, so the handler keeps the "/" fallback and no "/api/orders"
@@ -2895,6 +2933,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_jaxrs_java);
     RUN_TEST(handles_jaxrs_java_relative_path);
     RUN_TEST(handles_grails_controller_convention_routes);
+    RUN_TEST(handles_grails_url_mappings);
     RUN_TEST(handles_spring_java_relative_string_not_route);
     RUN_TEST(handles_jaxrs_scala);
     RUN_TEST(handles_aspnet_csharp);
