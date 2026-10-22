@@ -1220,6 +1220,11 @@ int cbm_parallel_resolve(cbm_pipeline_ctx_t *ctx, const cbm_file_info_t *files, 
  * have url_path in properties but point to library functions instead of routes.
  * Re-targets these edges to Route nodes for cross-service traversal. */
 void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
+/* A generated OpenAPI client call (`reviewExecutionApi.reviewFiles()`, callee
+ * unresolved or name-guessed): an HTTP_CALLS edge to its operation Route
+ * (method OPENAPI) for cross-repo matching. Shared by both call passes. */
+bool cbm_pipeline_openapi_client_call(cbm_gbuf_t *gb, const cbm_gbuf_node_t *source,
+                                      const CBMCall *call, const cbm_resolution_t *res);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

@@ -37,6 +37,7 @@ enum {
 #include "helpers.h"           /* cbm_is_test_file */
 #include "discover/discover.h" /* cbm_language_for_filename */
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1282,6 +1283,60 @@ static void create_sveltekit_routes(cbm_gbuf_t *gb) {
         snprintf(b3, sizeof(b3), "%d", ctx.handles_created);
         cbm_log_info("pass.sveltekit_routes", "files", b1, "routes", b2, "handles", b3);
     }
+}
+
+/* A generated OpenAPI client call: `<x>Api.<operation>(...)` on a receiver
+ * named after its API class (reviewExecutionApi.reviewFiles), the callee left
+ * unresolved or only name-guessed (the class lives in a generated library).
+ * Records an HTTP call to the operation itself -- Route
+ * "__route__OPENAPI__ReviewExecutionApi.reviewFiles", method OPENAPI -- which
+ * cross-repo matching turns into the method and path the indexed API
+ * description declares. Returns true when it recorded one.
+ * shortcut: the API class is read from the receiver's name, upgrade to its
+ * declared type when the resolver exposes field types here. */
+enum { OA_GUESS_CONF_PCT = 50 };
+
+bool cbm_pipeline_openapi_client_call(cbm_gbuf_t *gb, const cbm_gbuf_node_t *source,
+                                      const CBMCall *call, const cbm_resolution_t *res) {
+    if (!gb || !source || !call || !call->callee_name ||
+        (res && res->qualified_name && res->qualified_name[0] &&
+         res->confidence * 100.0 >= OA_GUESS_CONF_PCT)) {
+        return false;
+    }
+    const char *op = strrchr(call->callee_name, '.');
+    if (!op || op == call->callee_name || !islower((unsigned char)op[1])) {
+        return false;
+    }
+    const char *recv = op;
+    while (recv > call->callee_name && (isalnum((unsigned char)recv[-1]) || recv[-1] == '_')) {
+        recv--;
+    }
+    size_t rlen = (size_t)(op - recv);
+    if (rlen <= strlen("Api") || strncmp(op - strlen("Api"), "Api", strlen("Api")) != 0 ||
+        !islower((unsigned char)recv[0])) {
+        return false;
+    }
+    for (const char *c = op + 1; *c; c++) {
+        if (!isalnum((unsigned char)*c) && *c != '_') {
+            return false;
+        }
+    }
+    char name[CBM_SZ_256];
+    (void)snprintf(name, sizeof(name), "%c%.*s.%s", toupper((unsigned char)recv[0]), (int)rlen - 1,
+                   recv + 1, op + 1);
+    char qn[CBM_ROUTE_QN_SIZE];
+    (void)snprintf(qn, sizeof(qn), "__route__OPENAPI__%s", name);
+    int64_t rid = cbm_gbuf_upsert_node(gb, "Route", name, qn, "", 0, 0,
+                                       "{\"method\":\"OPENAPI\",\"source\":\"openapi_client\"}");
+    char esc_c[CBM_SZ_256];
+    char props[CBM_SZ_1K];
+    cbm_json_escape(esc_c, sizeof(esc_c), call->callee_name);
+    (void)snprintf(props, sizeof(props),
+                   "{\"callee\":\"%s\",\"url_path\":\"%s\",\"method\":\"OPENAPI\","
+                   "\"via\":\"openapi_client\"}",
+                   esc_c, name);
+    cbm_gbuf_insert_edge(gb, source->id, rid, "HTTP_CALLS", props);
+    return true;
 }
 
 void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb) {
