@@ -241,18 +241,30 @@ static void build_cross_props(char *buf, size_t bufsz, const char *target_projec
                               const char *target_function, const char *target_file,
                               const char *url_or_channel, const char *extra_key,
                               const char *extra_val) {
+    /* Function names are free-form (a Spock feature method is any string):
+     * every value is escaped, or a quote makes the properties invalid JSON and
+     * the store refuses the edge. */
+    char e_proj[CBM_SZ_256];
+    char e_func[CBM_SZ_512];
+    char e_file[CBM_SZ_512];
+    char e_url[CBM_SZ_512];
+    char e_extra[CBM_SZ_64];
+    cbm_json_escape(e_proj, sizeof(e_proj), target_project ? target_project : "");
+    cbm_json_escape(e_func, sizeof(e_func), target_function ? target_function : "");
+    cbm_json_escape(e_file, sizeof(e_file), target_file ? target_file : "");
+    cbm_json_escape(e_url, sizeof(e_url), url_or_channel ? url_or_channel : "");
+    cbm_json_escape(e_extra, sizeof(e_extra), extra_val ? extra_val : "");
     int n = snprintf(buf, bufsz,
                      "{\"target_project\":\"%s\",\"target_function\":\"%s\","
                      "\"target_file\":\"%s\"",
-                     target_project ? target_project : "", target_function ? target_function : "",
-                     target_file ? target_file : "");
-    if (url_or_channel && url_or_channel[0]) {
+                     e_proj, e_func, e_file);
+    if (e_url[0]) {
         n += snprintf(buf + n, bufsz - (size_t)n, ",\"%s\":\"%s\"",
-                      extra_key ? extra_key : "url_path", url_or_channel);
+                      extra_key ? extra_key : "url_path", e_url);
     }
-    if (extra_val && extra_val[0]) {
+    if (e_extra[0]) {
         n += snprintf(buf + n, bufsz - (size_t)n, ",\"%s\":\"%s\"",
-                      extra_key ? "transport" : "method", extra_val);
+                      extra_key ? "transport" : "method", e_extra);
     }
     snprintf(buf + n, bufsz - (size_t)n, "}");
 }

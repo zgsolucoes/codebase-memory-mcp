@@ -73,10 +73,11 @@ static bool cross_repo_create_project(const cross_repo_fixture_t *fixture, const
 
 /* Seed one HTTP_CALLS/HANDLES pair into two exact project stores. The suffix
  * keeps node QNs unique when a source is linked to more than one target. */
-static bool cross_repo_seed_http_call(const cross_repo_fixture_t *fixture,
-                                      const char *source_project, const char *target_project,
-                                      const char *call_path, const char *route_path,
-                                      const char *suffix) {
+static bool cross_repo_seed_http_call_named(const cross_repo_fixture_t *fixture,
+                                            const char *source_project,
+                                            const char *target_project, const char *call_path,
+                                            const char *route_path, const char *suffix,
+                                            const char *caller_name) {
     char source_path[512];
     char target_path[512];
     if (!cross_repo_project_path(fixture, source_project, source_path, sizeof(source_path)) ||
@@ -109,7 +110,7 @@ static bool cross_repo_seed_http_call(const cross_repo_fixture_t *fixture,
 
     cbm_node_t caller = {.project = source_project,
                          .label = "Function",
-                         .name = "call_remote",
+                         .name = caller_name,
                          .qualified_name = caller_qn,
                          .file_path = "client.c"};
     cbm_node_t local_route = {.project = source_project,
@@ -149,11 +150,27 @@ static bool cross_repo_seed_http_call(const cross_repo_fixture_t *fixture,
     return ok;
 }
 
+static bool cross_repo_seed_http_call(const cross_repo_fixture_t *fixture,
+                                      const char *source_project, const char *target_project,
+                                      const char *call_path, const char *route_path,
+                                      const char *suffix) {
+    return cross_repo_seed_http_call_named(fixture, source_project, target_project, call_path,
+                                           route_path, suffix, "call_remote");
+}
+
 static bool cross_repo_seed_http_pair(const cross_repo_fixture_t *fixture,
                                       const char *source_project, const char *target_project,
                                       const char *route_path, const char *suffix) {
     return cross_repo_seed_http_call(fixture, source_project, target_project, route_path,
                                      route_path, suffix);
+}
+
+static bool cross_repo_seed_http_pair_named(const cross_repo_fixture_t *fixture,
+                                            const char *source_project,
+                                            const char *target_project, const char *route_path,
+                                            const char *suffix, const char *caller_name) {
+    return cross_repo_seed_http_call_named(fixture, source_project, target_project, route_path,
+                                           route_path, suffix, caller_name);
 }
 
 /* Give the source project its own handler for the local Route the seeded
@@ -1069,6 +1086,34 @@ TEST(cross_repo_openapi_client_call_binds_server_route) {
     PASS();
 }
 
+/* Edge properties name the other side's function, and a Spock feature method
+ * is named by a free-form string ("retorna \"PREVIEW\" quando..."). Unescaped,
+ * a quote or backslash made the properties invalid JSON, the store refused the
+ * edge and the whole cross-repo run of the project failed. */
+TEST(cross_repo_escapes_quoted_function_names) {
+    cross_repo_fixture_t fixture;
+    bool setup = cross_repo_fixture_begin(&fixture) &&
+                 cross_repo_seed_http_pair_named(&fixture, "client-quoted", "api-quoted",
+                                                 "/api/quoted", "client",
+                                                 "\"retorna \\\"PREVIEW\\\" em C:\\tmp\"");
+    if (!setup) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed quoted-name fixture");
+    }
+    const char *target = "api-quoted";
+    cbm_cross_repo_result_t result = cbm_cross_repo_match("client-quoted", &target, 1);
+    int client_edges = cross_repo_count_edges(&fixture, "client-quoted", "CROSS_HTTP_CALLS");
+    int api_edges = cross_repo_count_edges(&fixture, "api-quoted", "CROSS_HTTP_CALLS");
+    cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
+
+    ASSERT_FALSE(result.failed);
+    ASSERT_EQ(result.http_edges, 1);
+    ASSERT_EQ(client_edges, 1);
+    ASSERT_EQ(api_edges, 1);
+    PASS();
+}
+
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
@@ -1081,6 +1126,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_status_distinguishes_never_run_from_ran_without_links);
     RUN_TEST(cross_repo_wildcard_reports_skipped_pre768_store);
     RUN_TEST(cross_repo_matches_calls_past_4096_rows);
+    RUN_TEST(cross_repo_escapes_quoted_function_names);
     RUN_TEST(cross_repo_openapi_client_call_binds_server_route);
     RUN_TEST(cross_repo_all_placeholder_route_does_not_match_any_url);
     RUN_TEST(cross_repo_template_with_literal_segment_matches_concrete_url);
