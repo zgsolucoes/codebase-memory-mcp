@@ -1224,6 +1224,11 @@ void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb);
  * files (read from repo_path), replacing the HTTP_CALLS the mapping literals
  * formed. Runs after cbm_pipeline_create_route_nodes. */
 void cbm_pipeline_grails_mapping_routes(cbm_gbuf_t *gb, const char *repo_path);
+/* A generated OpenAPI client call (`reviewExecutionApi.reviewFiles()`, callee
+ * unresolved or name-guessed): an HTTP_CALLS edge to its operation Route
+ * (method OPENAPI) for cross-repo matching. Shared by both call passes. */
+bool cbm_pipeline_openapi_client_call(cbm_gbuf_t *gb, const cbm_gbuf_node_t *source,
+                                      const CBMCall *call, const cbm_resolution_t *res);
 
 /* ── Pass function prototypes ────────────────────────────────────── */
 

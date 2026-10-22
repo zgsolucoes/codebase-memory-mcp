@@ -994,6 +994,81 @@ TEST(cross_repo_template_with_literal_segment_matches_concrete_url) {
     PASS();
 }
 
+/* A generated OpenAPI client call names no URL: `reviewExecutionApi.reviewFiles()`
+ * is recorded as an HTTP call to the operation ("ReviewExecutionApi.reviewFiles",
+ * method OPENAPI). Cross-repo matching reads the operation's method and path
+ * from the indexed API description (tag ReviewExecution, operationId
+ * reviewFiles -> POST /api/review) and binds the call to the server route. */
+static bool cross_repo_seed_openapi(const cross_repo_fixture_t *fixture) {
+    char path[512];
+    const char *projects[] = {"oa-consumer", "oa-client-spec", "oa-server"};
+    cbm_store_t *st[3] = {NULL, NULL, NULL};
+    bool ok = true;
+    for (int i = 0; i < 3 && ok; i++) {
+        ok = cross_repo_project_path(fixture, projects[i], path, sizeof(path)) &&
+             (st[i] = cbm_store_open_path(path)) != NULL &&
+             cbm_store_upsert_project(st[i], projects[i], fixture->cache) == CBM_STORE_OK;
+    }
+    cbm_node_t caller = {.project = "oa-consumer", .label = "Method", .name = "submit",
+                         .qualified_name = "oa-consumer.Svc.submit", .file_path = "Svc.groovy"};
+    cbm_node_t op_route = {.project = "oa-consumer", .label = "Route",
+                           .name = "ReviewExecutionApi.reviewFiles",
+                           .qualified_name = "__route__OPENAPI__ReviewExecutionApi.reviewFiles",
+                           .file_path = ""};
+    int64_t caller_id = ok ? cbm_store_upsert_node(st[0], &caller) : 0;
+    int64_t op_id = ok ? cbm_store_upsert_node(st[0], &op_route) : 0;
+    cbm_edge_t call = {.project = "oa-consumer", .source_id = caller_id, .target_id = op_id,
+                       .type = "HTTP_CALLS",
+                       .properties_json = "{\"callee\":\"reviewExecutionApi.reviewFiles\","
+                                          "\"url_path\":\"ReviewExecutionApi.reviewFiles\","
+                                          "\"method\":\"OPENAPI\"}"};
+    ok = ok && caller_id > 0 && op_id > 0 && cbm_store_insert_edge(st[0], &call) > 0;
+
+    cbm_node_t spec_route = {
+        .project = "oa-client-spec", .label = "Route", .name = "/api/review",
+        .qualified_name = "__route__POST__/api/review", .file_path = "api.spec.yaml",
+        .properties_json = "{\"method\":\"POST\",\"source\":\"openapi\","
+                           "\"operation_id\":\"reviewFiles\",\"tag\":\"Review Execution\"}"};
+    ok = ok && cbm_store_upsert_node(st[1], &spec_route) > 0;
+
+    cbm_node_t srv_route = {.project = "oa-server", .label = "Route", .name = "/api/review",
+                            .qualified_name = "__route__POST__/api/review",
+                            .file_path = "UrlMappings.groovy"};
+    cbm_node_t handler = {.project = "oa-server", .label = "Method", .name = "reviewFiles",
+                          .qualified_name = "oa-server.ReviewController.reviewFiles",
+                          .file_path = "ReviewController.groovy"};
+    int64_t rid = ok ? cbm_store_upsert_node(st[2], &srv_route) : 0;
+    int64_t hid = ok ? cbm_store_upsert_node(st[2], &handler) : 0;
+    cbm_edge_t handles = {.project = "oa-server", .source_id = hid, .target_id = rid,
+                          .type = "HANDLES"};
+    ok = ok && rid > 0 && hid > 0 && cbm_store_insert_edge(st[2], &handles) > 0;
+    for (int i = 0; i < 3; i++) {
+        cbm_store_close(st[i]);
+    }
+    return ok;
+}
+
+TEST(cross_repo_openapi_client_call_binds_server_route) {
+    cross_repo_fixture_t fixture;
+    bool setup = cross_repo_fixture_begin(&fixture) && cross_repo_seed_openapi(&fixture);
+    if (!setup) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed openapi fixture");
+    }
+    const char *all[] = {"*"};
+    cbm_cross_repo_result_t result = cbm_cross_repo_match("oa-consumer", all, 1);
+    int consumer_edges = cross_repo_count_edges(&fixture, "oa-consumer", "CROSS_HTTP_CALLS");
+    int server_edges = cross_repo_count_edges(&fixture, "oa-server", "CROSS_HTTP_CALLS");
+    cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&result);
+
+    ASSERT_FALSE(result.failed);
+    ASSERT_EQ(result.http_edges, 1);
+    ASSERT_EQ(consumer_edges, 1);
+    ASSERT_EQ(server_edges, 1);
+    PASS();
+}
+
 SUITE(cross_repo) {
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
@@ -1006,6 +1081,7 @@ SUITE(cross_repo) {
     RUN_TEST(cross_repo_status_distinguishes_never_run_from_ran_without_links);
     RUN_TEST(cross_repo_wildcard_reports_skipped_pre768_store);
     RUN_TEST(cross_repo_matches_calls_past_4096_rows);
+    RUN_TEST(cross_repo_openapi_client_call_binds_server_route);
     RUN_TEST(cross_repo_all_placeholder_route_does_not_match_any_url);
     RUN_TEST(cross_repo_template_with_literal_segment_matches_concrete_url);
     RUN_TEST(cross_repo_propagates_delete_failure);

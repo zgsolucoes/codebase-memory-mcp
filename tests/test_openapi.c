@@ -101,6 +101,46 @@ TEST(openapi_yaml) {
     PASS();
 }
 
+/* The server's base path prefixes every operation path: the route a client
+ * calls, and the one its server registers, is "/api/review", not "/review".
+ * OpenAPI 3 names it in the first `servers` url, Swagger 2 in `basePath`. The
+ * operation's first tag is kept (generated clients are named after it). */
+TEST(openapi_server_base_path) {
+    static const char spec3[] = "openapi: 3.0.0\n"
+                                "info:\n  title: Reviewer\n"
+                                "servers:\n"
+                                "  - url: http://localhost:8182/api/\n"
+                                "  - url: https://other/v2\n"
+                                "paths:\n"
+                                "  /review/{id}:\n"
+                                "    post:\n"
+                                "      tags:\n        - ReviewExecution\n"
+                                "      operationId: reviewFiles\n";
+    CBMFileResult *r = dm_extract(spec3, CBM_LANG_YAML, "api.spec.yaml");
+    ASSERT_NOT_NULL(r);
+    const CBMDefinition *d = oa_route(r, "__route__POST__/api/review/{}");
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d->name, "/api/review/{id}");
+    ASSERT_STR_EQ(oa_prop(d, "tag"), "ReviewExecution");
+    cbm_free_result(r);
+
+    static const char spec2[] = "{\"swagger\": \"2.0\", \"basePath\": \"/v1\",\n"
+                                " \"paths\": {\"/pets\": {\"get\": {\"operationId\": \"listPets\"}}}}\n";
+    r = dm_extract(spec2, CBM_LANG_OPENAPI, "swagger.json");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(oa_route(r, "__route__GET__/v1/pets"));
+    cbm_free_result(r);
+
+    /* a root server url ("/" or a bare host) adds nothing */
+    r = dm_extract("openapi: 3.0.0\nservers:\n  - url: https://api.example.com\npaths:\n"
+                   "  /pets:\n    get:\n      operationId: listPets\n",
+                   CBM_LANG_YAML, "openapi.yaml");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(oa_route(r, "__route__GET__/pets"));
+    cbm_free_result(r);
+    PASS();
+}
+
 TEST(openapi_json) {
     static const char spec[] =
         "{\"swagger\": \"2.0\", \"info\": {\"title\": \"Pets\"},\n"
@@ -238,5 +278,6 @@ TEST(openapi_graph) {
 SUITE(openapi) {
     RUN_TEST(openapi_yaml);
     RUN_TEST(openapi_json);
+    RUN_TEST(openapi_server_base_path);
     RUN_TEST(openapi_graph);
 }

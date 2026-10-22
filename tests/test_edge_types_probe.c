@@ -2246,6 +2246,32 @@ TEST(http_calls_zg_rest_client_groovy) {
     PASS();
 }
 
+/* Generated OpenAPI client: `reviewExecutionApi.reviewFiles(dto)` calls a
+ * class of an external library (ReviewExecutionApi, generated from tag
+ * ReviewExecution) and names no URL. It is recorded as an HTTP call to the
+ * operation (Route "ReviewExecutionApi.reviewFiles", method OPENAPI), which
+ * cross-repo matching resolves through the API description. Both the
+ * sequential and the parallel resolver record it. */
+static const EtFile et_openapi_client[] = {
+    {"src/main/groovy/com/example/Envio.groovy",
+     "package com.example\n\n"
+     "import com.example.client.api.ReviewExecutionApi\n\n"
+     "class Envio {\n"
+     "    ReviewExecutionApi reviewExecutionApi\n\n"
+     "    void enviar(Object dto) {\n"
+     "        reviewExecutionApi.reviewFiles(dto)\n"
+     "    }\n}\n"}};
+static const char *et_openapi_client_routes[] = {"ReviewExecutionApi.reviewFiles", NULL};
+
+TEST(http_calls_openapi_generated_client) {
+    ASSERT_TRUE(et_edge_present(et_openapi_client, 1, "HTTP_CALLS", 1));
+    ASSERT_TRUE(et_routes_exact_mode(et_openapi_client, 1, et_openapi_client_routes, false,
+                                     "__route__OPENAPI__ReviewExecutionApi.reviewFiles"));
+    ASSERT_TRUE(et_routes_exact_mode(et_openapi_client, 1, et_openapi_client_routes, true,
+                                     "__route__OPENAPI__ReviewExecutionApi.reviewFiles"));
+    PASS();
+}
+
 TEST(http_calls_resttemplate_java) {
     static const EtFile f[] = {
         {"RestTemplate.java",
@@ -3421,6 +3447,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(http_calls_requests_python);
     RUN_TEST(http_calls_nethttp_go);
     RUN_TEST(http_calls_zg_rest_client_groovy);
+    RUN_TEST(http_calls_openapi_generated_client);
     RUN_TEST(http_calls_resttemplate_java);
     RUN_TEST(http_calls_resttemplate_groovy);
     RUN_TEST(async_calls_kafka_template_groovy);

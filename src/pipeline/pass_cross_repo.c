@@ -18,6 +18,8 @@
 #include "foundation/compat.h"
 #include "foundation/compat_fs.h"
 #include "foundation/str_util.h"
+#include "foundation/hash_table.h"
+#include <ctype.h>
 
 #include <sqlite3/sqlite3.h>
 #include <yyjson/yyjson.h>
@@ -57,6 +59,13 @@ typedef struct {
     const atomic_int *cancelled;
     bool cancellation_observed;
     bool mutated;
+    /* Every project of the run, and the OpenAPI operations their API
+     * descriptions declare ("<tag>api.<operationId>" -> "METHOD path"), read
+     * the first time a generated-client call needs them. */
+    char *const *projects;
+    int project_count;
+    CBMHashTable *openapi_ops;
+    bool openapi_loaded;
 } cr_run_context_t;
 
 static CBM_TLS cbm_cross_repo_after_insert_test_hook_t cr_after_insert_test_hook = NULL;
@@ -690,6 +699,108 @@ static bool call_served_locally(cbm_store_t *src_store, struct sqlite3 *src_db,
     return resolve_route_handler(src_store, method, curl, &local, failed, ctx) != 0;
 }
 
+/* Key of a generated-client operation: the API class name lowercased to its
+ * letters and digits ("Review Execution" tag + "Api" and the
+ * ReviewExecutionApi class both give "reviewexecutionapi"), "." and the
+ * operationId (the generated method name). */
+static void cr_openapi_key(const char *api, size_t api_len, bool add_api, const char *op, char *out,
+                           size_t out_sz) {
+    size_t n = 0;
+    for (size_t i = 0; i < api_len && n + 1 < out_sz; i++) {
+        if (isalnum((unsigned char)api[i])) {
+            out[n++] = (char)tolower((unsigned char)api[i]);
+        }
+    }
+    out[n] = '\0';
+    (void)snprintf(out + n, out_sz - n, "%s.%s", add_api ? "api" : "", op);
+}
+
+static void cr_openapi_free_value(const char *key, void *value, void *ud) {
+    (void)ud;
+    cbm_free(CBM_MEM_CLASS_OTHER, (void *)key);
+    cbm_free(CBM_MEM_CLASS_OTHER, value);
+}
+
+/* Record one project's operations; an operation two descriptions declare
+ * differently is ambiguous ("" value) and never matched. */
+static void cr_openapi_load_project(CBMHashTable *ops, const char *project) {
+    char path[CBM_SZ_1K];
+    struct sqlite3 *db = NULL;
+    if (!cr_db_path(project, path, sizeof(path)) ||
+        sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return;
+    }
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+                           "SELECT name, properties FROM nodes WHERE label = 'Route' AND "
+                           "properties LIKE '%\"source\":\"openapi\"%' AND "
+                           "properties LIKE '%\"operation_id\"%'",
+                           CBM_NOT_FOUND, &s, NULL) == SQLITE_OK) {
+        while (sqlite3_step(s) == SQLITE_ROW) {
+            const char *route = (const char *)sqlite3_column_text(s, 0);
+            const char *props = (const char *)sqlite3_column_text(s, SKIP_ONE);
+            char op[CBM_SZ_256] = {0};
+            char tag[CBM_SZ_256] = {0};
+            char method[CBM_SZ_32] = {0};
+            json_str_prop(props, "operation_id", op, sizeof(op));
+            json_str_prop(props, "method", method, sizeof(method));
+            if (!json_str_prop(props, "tag", tag, sizeof(tag))) {
+                snprintf(tag, sizeof(tag), "Default"); /* untagged: DefaultApi */
+            }
+            if (!route || !op[0] || !method[0]) {
+                continue;
+            }
+            char key[CBM_SZ_512];
+            char val[CBM_SZ_512];
+            cr_openapi_key(tag, strlen(tag), true, op, key, sizeof(key));
+            (void)snprintf(val, sizeof(val), "%s %s", method, route);
+            const char *prev = cbm_ht_get(ops, key);
+            if (prev && (!prev[0] || strcmp(prev, val) == 0)) {
+                continue;
+            }
+            char *v = cbm_mem_strdup(CBM_MEM_CLASS_OTHER, prev ? "" : val);
+            void *old_value = NULL;
+            const char *k = prev ? key : cbm_mem_strdup(CBM_MEM_CLASS_OTHER, key);
+            if (prev) { /* update through the stored key: the table keeps it */
+                old_value = cbm_ht_set(ops, cbm_ht_get_key(ops, key), v);
+                cbm_free(CBM_MEM_CLASS_OTHER, old_value);
+            } else if (k && v) {
+                (void)cbm_ht_set(ops, k, v);
+            }
+        }
+    }
+    sqlite3_finalize(s);
+    sqlite3_close(db);
+}
+
+/* Method and path of the generated-client operation url ("ReviewExecutionApi.reviewFiles"),
+ * from the run's API descriptions. False when none or several declare it. */
+static bool cr_openapi_operation(cr_run_context_t *ctx, const char *url, char *method,
+                                 size_t method_sz, char *path, size_t path_sz) {
+    if (!ctx->openapi_loaded) {
+        ctx->openapi_loaded = true;
+        ctx->openapi_ops = cbm_ht_create(CBM_SZ_256);
+        for (int i = 0; ctx->openapi_ops && i < ctx->project_count; i++) {
+            cr_openapi_load_project(ctx->openapi_ops, ctx->projects[i]);
+        }
+    }
+    const char *dot = strrchr(url, '.');
+    if (!ctx->openapi_ops || !dot || dot == url) {
+        return false;
+    }
+    char key[CBM_SZ_512];
+    cr_openapi_key(url, (size_t)(dot - url), false, dot + 1, key, sizeof(key));
+    const char *val = cbm_ht_get(ctx->openapi_ops, key);
+    const char *sp = val ? strchr(val, ' ') : NULL;
+    if (!sp || (size_t)(sp - val) >= method_sz) {
+        return false;
+    }
+    (void)snprintf(method, method_sz, "%.*s", (int)(sp - val), val);
+    (void)snprintf(path, path_sz, "%s", sp + 1);
+    return true;
+}
+
 static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *src_project,
                                            cbm_store_t *tgt_store, const char *tgt_project,
                                            cr_run_context_t *ctx) {
@@ -724,6 +835,12 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
         json_str_prop(props, "url_path", url_path, sizeof(url_path));
         json_str_prop(props, "method", method, sizeof(method));
         if (!url_path[0]) {
+            continue;
+        }
+        /* A generated OpenAPI client call names its operation, not a URL. */
+        if (strcmp(method, "OPENAPI") == 0 &&
+            !cr_openapi_operation(ctx, url_path, method, sizeof(method), url_path,
+                                  sizeof(url_path))) {
             continue;
         }
 
@@ -1446,6 +1563,8 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
         result.failed = !result.cancelled;
         return result;
     }
+    run.projects = resolved;
+    run.project_count = resolved_count;
     int other_targets = 0;
     for (int i = 0; i < resolved_count; i++) {
         if (cr_cancel_requested(&run)) {
@@ -1579,6 +1698,10 @@ cbm_cross_repo_result_t cbm_cross_repo_match_cancellable(const char *project,
     cbm_store_close(src_store);
 
     free_project_list(resolved, resolved_count);
+    if (run.openapi_ops) {
+        cbm_ht_foreach(run.openapi_ops, cr_openapi_free_value, NULL);
+        cbm_ht_free(run.openapi_ops);
+    }
 
     struct timespec t1;
     clock_gettime(CLOCK_MONOTONIC, &t1);

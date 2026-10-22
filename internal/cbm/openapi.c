@@ -130,6 +130,51 @@ static const char *oa_controller(const CBMExtractCtx *ctx, TSNode op, TSNode pat
     return NULL;
 }
 
+/* The first item of a sequence (YAML block/flow sequence, JSON array),
+ * through the wrappers around it; a null node for none. */
+static TSNode oa_first_item(TSNode n) {
+    for (int k = 0; k < OA_UNWRAP_MAX && !ts_node_is_null(n); k++) {
+        if (oa_is(n, "block_sequence") || oa_is(n, "flow_sequence") || oa_is(n, "array")) {
+            TSNode item = ts_node_named_child(n, 0);
+            return oa_is(item, "block_sequence_item") ? ts_node_named_child(item, 0) : item;
+        }
+        if (!oa_is(n, "block_node") && !oa_is(n, "flow_node")) {
+            break;
+        }
+        n = ts_node_named_child(n, 0);
+    }
+    return (TSNode){0};
+}
+
+/* The server's base path ("/api"): the path of the first OpenAPI 3 `servers`
+ * url (after scheme and host), or Swagger 2 `basePath`; "" when it is the
+ * root. A trailing slash is dropped. */
+static void oa_base_path(const CBMExtractCtx *ctx, TSNode root, char *out, size_t cap) {
+    char url[OA_SCALAR_MAX];
+    out[0] = '\0';
+    size_t len = oa_scalar(ctx, oa_get(ctx, root, "basePath"), url, sizeof(url));
+    if (!len) {
+        TSNode server = oa_mapping(oa_first_item(oa_get(ctx, root, "servers")));
+        len = oa_scalar(ctx, oa_get(ctx, server, "url"), url, sizeof(url));
+    }
+    const char *p = url;
+    const char *scheme = len ? strstr(url, "://") : NULL;
+    if (scheme) {
+        p = strchr(scheme + strlen("://"), '/');
+    }
+    if (!len || !p || *p != '/') {
+        return;
+    }
+    size_t pl = strlen(p);
+    while (pl > 0 && p[pl - SKIP_ONE] == '/') {
+        pl--;
+    }
+    if (pl < cap) {
+        memcpy(out, p, pl);
+        out[pl] = '\0';
+    }
+}
+
 /* One operation: its Route, and its operationId's reference. */
 static void oa_operation(CBMExtractCtx *ctx, const char *path, const char *method, TSNode op,
                          TSNode path_item, TSNode pair) {
@@ -146,18 +191,26 @@ static void oa_operation(CBMExtractCtx *ctx, const char *path, const char *metho
                                                cbm_route_canon_path(path, canon, pl + SKIP_ONE))
                            : NULL;
     const char *op_id = oa_dup_scalar(ctx, oa_get(ctx, op, "operationId"));
-    const char **kv = (const char **)cbm_arena_alloc(a, CBM_SZ_7 * sizeof(char *));
+    const char *tag = oa_dup_scalar(ctx, oa_first_item(oa_get(ctx, op, "tags")));
+    const char **kv = (const char **)cbm_arena_alloc(a, (CBM_SZ_8 + SKIP_ONE) * sizeof(char *));
     const char *m = cbm_arena_strdup(a, upper);
     if (!qn || !kv || !m) {
         return;
     }
-    kv[0] = "method";
-    kv[SKIP_ONE] = m;
-    kv[PAIR_LEN] = "source";
-    kv[CBM_SZ_3] = "openapi";
-    kv[CBM_SZ_4] = op_id ? "operation_id" : NULL;
-    kv[CBM_SZ_5] = op_id;
-    kv[CBM_SZ_6] = NULL;
+    int k = 0;
+    kv[k++] = "method";
+    kv[k++] = m;
+    kv[k++] = "source";
+    kv[k++] = "openapi";
+    if (op_id) {
+        kv[k++] = "operation_id";
+        kv[k++] = op_id;
+    }
+    if (tag) {
+        kv[k++] = "tag";
+        kv[k++] = tag;
+    }
+    kv[k] = NULL;
     CBMDefinition def;
     memset(&def, 0, sizeof(def));
     def.name = cbm_arena_strdup(a, path);
@@ -210,6 +263,8 @@ void cbm_extract_openapi(CBMExtractCtx *ctx) {
         return; /* no API description */
     }
     TSNode paths = oa_mapping(oa_get(ctx, root, "paths"));
+    char base[OA_SCALAR_MAX];
+    oa_base_path(ctx, root, base, sizeof(base));
     char path[OA_SCALAR_MAX];
     char key[OA_SCALAR_MAX];
     uint32_t np = ts_node_is_null(paths) ? 0 : ts_node_named_child_count(paths);
@@ -221,6 +276,8 @@ void cbm_extract_openapi(CBMExtractCtx *ctx) {
             continue;
         }
         TSNode item = oa_mapping(ts_node_child_by_field_name(pp, "value", CBM_SZ_5));
+        char full[OA_SCALAR_MAX * PAIR_LEN];
+        (void)snprintf(full, sizeof(full), "%s%s", base, path);
         uint32_t nm = ts_node_is_null(item) ? 0 : ts_node_named_child_count(item);
         for (uint32_t j = 0; j < nm; j++) {
             TSNode mp = ts_node_named_child(item, j);
@@ -232,7 +289,7 @@ void cbm_extract_openapi(CBMExtractCtx *ctx) {
             }
             TSNode op = oa_mapping(ts_node_child_by_field_name(mp, "value", CBM_SZ_5));
             if (!ts_node_is_null(op)) {
-                oa_operation(ctx, path, key, op, item, mp);
+                oa_operation(ctx, full, key, op, item, mp);
             }
         }
     }
