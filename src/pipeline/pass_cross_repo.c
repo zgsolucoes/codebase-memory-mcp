@@ -438,6 +438,8 @@ static int64_t find_route_handler(cbm_store_t *target_store, const char *route_q
 static bool cr_path_matches_template(const char *concrete, const char *templ) {
     const char *c = concrete;
     const char *t = templ;
+    /* An all-placeholder template ("/{}/{}") would match any URL of that depth. */
+    bool has_literal = false;
     while (*c && *t) {
         if (*c == '/') {
             c++;
@@ -460,6 +462,7 @@ static bool cr_path_matches_template(const char *concrete, const char *templ) {
             if (clen != tlen || strncmp(cseg, tseg, clen) != 0) {
                 return false;
             }
+            has_literal = true;
         } else if (clen == 0) {
             return false; /* a parameter never matches an empty segment */
         }
@@ -470,7 +473,7 @@ static bool cr_path_matches_template(const char *concrete, const char *templ) {
     while (*t == '/') {
         t++;
     }
-    return *c == '\0' && *t == '\0';
+    return has_literal && *c == '\0' && *t == '\0';
 }
 
 /* Fallback for when the exact route-QN lookup misses: a concrete client path
