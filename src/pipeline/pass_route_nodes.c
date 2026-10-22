@@ -37,6 +37,7 @@ enum {
 #include "helpers.h"           /* cbm_is_test_file */
 #include "discover/discover.h" /* cbm_language_for_filename */
 
+#include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -522,6 +523,89 @@ static void ensure_decorator_routes(cbm_gbuf_t *gb) {
         char buf[CBM_SZ_16];
         snprintf(buf, sizeof(buf), "%d", created);
         cbm_log_info("pass.ensure_decorator_routes", "created", buf);
+    }
+}
+
+/* Grails controller name of a "grails-app/controllers/" Method's class:
+ * "ExecucaoController" -> "execucao" (the $controller of a URL mapping).
+ * Returns false when the method does not sit on a Grails controller. */
+static bool grails_controller_name(const cbm_gbuf_node_t *m, char *out, size_t out_sz) {
+    char cls_qn[CBM_SZ_512];
+    if (!m->file_path || !strstr(m->file_path, "grails-app/controllers/") || !m->properties_json ||
+        strstr(m->properties_json, "\"is_exported\":false") ||
+        !extract_json_prop(m->properties_json, "parent_class", cls_qn, sizeof(cls_qn))) {
+        return false;
+    }
+    const char *dot = strrchr(cls_qn, '.');
+    const char *cls = dot ? dot + 1 : cls_qn;
+    size_t len = strlen(cls);
+    size_t suffix = strlen("Controller");
+    if (len <= suffix || strcmp(cls + len - suffix, "Controller") != 0 || len - suffix >= out_sz) {
+        return false;
+    }
+    memcpy(out, cls, len - suffix);
+    out[len - suffix] = '\0';
+    out[0] = (char)tolower((unsigned char)out[0]);
+    return true;
+}
+
+/* Route + HANDLES for one Grails convention path, any HTTP method. */
+static void grails_convention_route(cbm_gbuf_t *gb, const cbm_gbuf_node_t *m, const char *path) {
+    char qn[CBM_ROUTE_QN_SIZE];
+    char cpath[CBM_SZ_512];
+    (void)snprintf(qn, sizeof(qn), "__route__ANY__%s",
+                   cbm_route_canon_path(path, cpath, sizeof(cpath)));
+    int64_t route_id =
+        cbm_gbuf_upsert_node(gb, "Route", path, qn, m->file_path, 0, 0,
+                             "{\"method\":\"ANY\",\"source\":\"grails_convention\"}");
+    char esc_h[CBM_SZ_512];
+    char hprops[CBM_SZ_1K];
+    cbm_json_escape(esc_h, sizeof(esc_h), m->qualified_name ? m->qualified_name : "");
+    (void)snprintf(hprops, sizeof(hprops), "{\"handler\":\"%s\"}", esc_h);
+    cbm_gbuf_insert_edge(gb, m->id, route_id, "HANDLES", hprops);
+}
+
+/* Phase 2d: Grails' default URL mapping "/$controller/$action?/$id?" serves
+ * every public method of a *Controller under grails-app/controllers as
+ * /<controller>/<action> and /<controller>/<action>/<id>. Those are the paths
+ * Grails clients call, so each action gets both Routes.
+ * shortcut: assumes the default mapping is present (it ships with every
+ * generated Grails app) and ignores allowedMethods, so the routes accept any
+ * method; upgrade by reading UrlMappings/allowedMethods when an app removes it. */
+static void create_grails_convention_routes(cbm_gbuf_t *gb) {
+    const cbm_gbuf_node_t **methods = NULL;
+    int count = 0;
+    if (cbm_gbuf_find_by_label(gb, "Method", &methods, &count) != 0 || count == 0) {
+        return;
+    }
+    /* Collect first: upserting Routes edits the label index being walked. */
+    const cbm_gbuf_node_t **actions =
+        cbm_calloc(CBM_MEM_CLASS_OTHER, (size_t)count * sizeof(*actions));
+    if (!actions) {
+        return;
+    }
+    int n = 0;
+    char ctrl[CBM_SZ_128];
+    for (int i = 0; i < count; i++) {
+        if (methods[i]->name && grails_controller_name(methods[i], ctrl, sizeof(ctrl))) {
+            actions[n++] = methods[i];
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        char path[CBM_SZ_512];
+        if (!grails_controller_name(actions[i], ctrl, sizeof(ctrl))) {
+            continue;
+        }
+        (void)snprintf(path, sizeof(path), "/%s/%s", ctrl, actions[i]->name);
+        grails_convention_route(gb, actions[i], path);
+        (void)snprintf(path, sizeof(path), "/%s/%s/{id}", ctrl, actions[i]->name);
+        grails_convention_route(gb, actions[i], path);
+    }
+    cbm_free(CBM_MEM_CLASS_OTHER, actions);
+    if (n > 0) {
+        char buf[CBM_SZ_16];
+        snprintf(buf, sizeof(buf), "%d", n);
+        cbm_log_info("pass.grails_routes", "actions", buf);
     }
 }
 
@@ -1301,6 +1385,9 @@ void cbm_pipeline_create_route_nodes(cbm_gbuf_t *gb) {
     /* Phase 2a: ensure all functions with route_path have Route+HANDLES.
      * Handles incremental mode where unchanged files don't re-extract. */
     ensure_decorator_routes(gb);
+
+    /* Phase 2d: Grails controller actions under the default URL mapping. */
+    create_grails_convention_routes(gb);
 
     /* Phase 2b: connect prefix Routes to decorator handler Functions.
      * Must run BEFORE match_infra_routes so infra matching can find

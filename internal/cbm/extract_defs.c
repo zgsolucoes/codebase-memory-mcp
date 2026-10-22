@@ -4602,6 +4602,21 @@ static const char **extract_julia_base_classes(CBMArena *a, TSNode node, const c
     return result;
 }
 
+/* Groovy members are public unless marked: a `private`/`protected`
+ * access_modifier child restricts them (name-based cbm_is_exported cannot). */
+static bool groovy_member_is_restricted(TSNode node, CBMLanguage lang, const char *source) {
+    if (lang != CBM_LANG_GROOVY) {
+        return false;
+    }
+    TSNode mod = cbm_find_child_by_kind(node, "access_modifier");
+    if (ts_node_is_null(mod)) {
+        return false;
+    }
+    uint32_t start = ts_node_start_byte(mod);
+    return strncmp(source + start, "private", strlen("private")) == 0 ||
+           strncmp(source + start, "protected", strlen("protected")) == 0;
+}
+
 static const char **extract_base_classes(CBMArena *a, TSNode node, const char *source,
                                          CBMLanguage lang) {
     // ObjectScript: `Class X Extends (A, B)` — bases are class_name children of
@@ -8750,7 +8765,8 @@ static void push_method_def(CBMExtractCtx *ctx, TSNode child, TSNode class_node,
     def.start_line = ts_node_start_point(child).row + TS_LINE_OFFSET;
     def.end_line = ts_node_end_point(child).row + TS_LINE_OFFSET;
     def.lines = (int)(def.end_line - def.start_line + TS_LINE_OFFSET);
-    def.is_exported = cbm_is_exported(name, ctx->language);
+    def.is_exported = cbm_is_exported(name, ctx->language) &&
+                      !groovy_member_is_restricted(child, ctx->language, ctx->source);
     if (ctx->language == CBM_LANG_RUST &&
         strcmp(ts_node_type(child), "function_signature_item") == 0) {
         def.is_abstract = true;

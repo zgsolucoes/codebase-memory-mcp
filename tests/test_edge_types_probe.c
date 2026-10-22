@@ -740,6 +740,31 @@ TEST(handles_jaxrs_java_relative_path) {
     PASS();
 }
 
+/* Grails: the default URL mapping "/$controller/$action?/$id?" serves every
+ * public method of a *Controller under grails-app/controllers, so
+ * ExecucaoController.status is reachable as /execucao/status and
+ * /execucao/status/<id> -- the paths Grails REST clients call. Private
+ * methods and classes outside grails-app/controllers are not actions. */
+TEST(handles_grails_controller_convention_routes) {
+    static const char *routes[] = {"/execucao/status", "/execucao/status/{id}", NULL};
+    static const EtFile f[] = {
+        {"grails-app/controllers/com/example/ExecucaoController.groovy",
+         "package com.example\n\n"
+         "class ExecucaoController {\n"
+         "    def status(Long id) {\n"
+         "        render id\n    }\n\n"
+         "    private def ajuda() {\n"
+         "        1\n    }\n}\n"},
+        {"src/main/groovy/com/example/OutroController.groovy",
+         "package com.example\n\n"
+         "class OutroController {\n"
+         "    def lista() {\n"
+         "        []\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, false, "__route__ANY__/execucao/status/{}"));
+    PASS();
+}
+
 /* Negative control: the relative-template acceptance is scoped to JAX-RS
  * @Path. A slash-less string on a Spring mapping annotation is still not read
  * as a route path, so the handler keeps the "/" fallback and no "/api/orders"
@@ -2869,6 +2894,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_spring_kotlin);
     RUN_TEST(handles_jaxrs_java);
     RUN_TEST(handles_jaxrs_java_relative_path);
+    RUN_TEST(handles_grails_controller_convention_routes);
     RUN_TEST(handles_spring_java_relative_string_not_route);
     RUN_TEST(handles_jaxrs_scala);
     RUN_TEST(handles_aspnet_csharp);
