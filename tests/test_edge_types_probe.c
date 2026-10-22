@@ -813,6 +813,9 @@ TEST(handles_jaxrs_java_interface_with_own_path_not_doubled) {
          "    public String get(String id) {\n"
          "        return id;\n    }\n}\n"}};
     ASSERT_TRUE(et_routes_exact(f, 2, routes));
+    PASS();
+}
+
 /* Grails: the default URL mapping "/$controller/$action?/$id?" serves every
  * public method of a *Controller under grails-app/controllers, so
  * ExecucaoController.status is reachable as /execucao/status and

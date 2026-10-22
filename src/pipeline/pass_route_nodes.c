@@ -739,6 +739,9 @@ static void mount_interface_routes(cbm_gbuf_t *gb) {
         char buf[CBM_SZ_16];
         snprintf(buf, sizeof(buf), "%d", mounted);
         cbm_log_info("pass.interface_routes", "mounted", buf);
+    }
+}
+
 /* Grails controller name of a "grails-app/controllers/" Method's class:
  * "ExecucaoController" -> "execucao" (the $controller of a URL mapping).
  * Returns false when the method does not sit on a Grails controller. */
