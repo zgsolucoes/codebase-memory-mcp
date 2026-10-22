@@ -2561,6 +2561,71 @@ static const char *js_config_object_url(CBMExtractCtx *ctx, TSNode obj, const ch
     return NULL;
 }
 
+/* zg-rest-client (ZG-only Groovy REST client): a domain class calls its
+ * service with performGet/performPost/...(path: "<controller>/<action>/$id"),
+ * a path relative to the service root. Project it as the rooted URL with each
+ * interpolation ("$id", "${x}") or trailing concatenation ("..." + id) as one
+ * "{}" parameter: the call's URL, which the perform* HTTP service pattern
+ * turns into an HTTP_CALLS edge.
+ * shortcut: string-literal paths only (a path held in a variable is skipped). */
+static bool zg_rest_client_callee(const char *callee) {
+    static const char *verbs[] = {"Get", "Post", "Put", "Delete", "Patch", "Head", NULL};
+    const char *dot = callee ? strrchr(callee, '.') : NULL;
+    const char *name = dot ? dot + 1 : callee;
+    if (!name || strncmp(name, "perform", strlen("perform")) != 0) {
+        return false;
+    }
+    for (int i = 0; verbs[i]; i++) {
+        if (strncmp(name + strlen("perform"), verbs[i], strlen(verbs[i])) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void zg_rest_client_path(CBMExtractCtx *ctx, CBMCall *call) {
+    if (ctx->language != CBM_LANG_GROOVY || !zg_rest_client_callee(call->callee_name)) {
+        return;
+    }
+    for (int i = 0; i < call->arg_count; i++) {
+        CBMCallArg *ca = &call->args[i];
+        const char *e = ca->expr;
+        if (!ca->keyword || strcmp(ca->keyword, "path") != 0 || !e || (*e != '"' && *e != '\'')) {
+            continue;
+        }
+        char quote = *e++;
+        char buf[CBM_SZ_512];
+        size_t n = 0;
+        buf[n++] = '/';
+        e += (*e == '/') ? 1 : 0;
+        while (*e && *e != quote && n + 3 < sizeof(buf)) {
+            if (*e == '$' && quote == '"') { /* GString interpolation -> {} */
+                buf[n++] = '{';
+                buf[n++] = '}';
+                if (*++e == '{') {
+                    while (*e && *e != '}') {
+                        e++;
+                    }
+                    e += (*e == '}') ? 1 : 0;
+                } else {
+                    while (isalnum((unsigned char)*e) || *e == '_' || *e == '.') {
+                        e++;
+                    }
+                }
+                continue;
+            }
+            buf[n++] = *e++;
+        }
+        if (*e == quote && strchr(e + 1, '+') && n + 2 < sizeof(buf)) {
+            buf[n++] = '{'; /* "execucao/fetchAll/" + id */
+            buf[n++] = '}';
+        }
+        buf[n] = '\0';
+        call->first_string_arg = cbm_arena_strdup(ctx->arena, buf);
+        return;
+    }
+}
+
 /* Extract all arguments from a call expression into call->args[]. */
 static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
     uint32_t argc = ts_node_named_child_count(args);
@@ -2585,7 +2650,8 @@ static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
         CBMCallArg *ca = &call->args[call->arg_count];
         memset(ca, 0, sizeof(*ca));
 
-        if (strcmp(ak, "keyword_argument") == 0 || strcmp(ak, "pair") == 0) {
+        if (strcmp(ak, "keyword_argument") == 0 || strcmp(ak, "pair") == 0 ||
+            strcmp(ak, "map_item") == 0) { /* Groovy named argument `path: x` */
             process_keyword_arg(ctx, arg_node, ca);
             ca->index = positional_idx++;
             call->arg_count++;
@@ -2633,6 +2699,7 @@ static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
             call->arg_count++;
         }
     }
+    zg_rest_client_path(ctx, call);
 }
 
 // Check if a keyword name matches URL or topic patterns.

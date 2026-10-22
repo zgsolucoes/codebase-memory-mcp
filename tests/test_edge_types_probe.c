@@ -1829,6 +1829,30 @@ TEST(http_calls_nethttp_go) {
 }
 
 /* RestTemplate (Java) — "RestTemplate" substring in resolved QN */
+/* zg-rest-client (ZG's Groovy REST client, fork only): a domain class calls
+ * its service through performGet/performPost(path: "<controller>/<action>/$id"),
+ * a path relative to the service root. It becomes an HTTP_CALLS edge to the
+ * rooted, canonical route ("$id" / "${x}" / "+ x" are one path parameter), the
+ * shape the Grails controller-convention routes are keyed by. */
+TEST(http_calls_zg_rest_client_groovy) {
+    static const EtFile f[] = {
+        {"src/main/groovy/com/example/StatusExecucao.groovy",
+         "package com.example\n\n"
+         "class StatusExecucao extends DomainClass {\n"
+         "    static Map buscar(Long id) {\n"
+         "        performGet(path: \"execucao/obtenhaStatusExecucao/$id\", dataType: Map)\n"
+         "    }\n\n"
+         "    static Map listar(Long id) {\n"
+         "        performPost(path: \"execucao/fetchAllByAgendamentoId/\" + id)\n"
+         "    }\n}\n"}};
+    static const char *routes[] = {"/execucao/obtenhaStatusExecucao/{}",
+                                   "/execucao/fetchAllByAgendamentoId/{}", NULL};
+    ASSERT_TRUE(et_edge_present(f, 1, "HTTP_CALLS", 2));
+    ASSERT_TRUE(et_routes_exact_mode(f, 1, routes, false,
+                                     "__route__GET__/execucao/obtenhaStatusExecucao/{}"));
+    PASS();
+}
+
 TEST(http_calls_resttemplate_java) {
     static const EtFile f[] = {
         {"RestTemplate.java",
@@ -2985,6 +3009,7 @@ SUITE(edge_types_probe) {
     RUN_TEST(http_calls_axios_ts);
     RUN_TEST(http_calls_requests_python);
     RUN_TEST(http_calls_nethttp_go);
+    RUN_TEST(http_calls_zg_rest_client_groovy);
     RUN_TEST(http_calls_resttemplate_java);
     RUN_TEST(http_calls_resttemplate_groovy);
     RUN_TEST(async_calls_kafka_template_groovy);
