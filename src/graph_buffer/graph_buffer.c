@@ -1551,9 +1551,10 @@ static bool gbuf_node_touched(const cbm_gbuf_t *gb, int64_t id, const char *cons
 }
 
 /* Delete the `label` nodes no edge of `types` (NULL-terminated) touches --
- * with `fileless`, only those carrying no file; returns how many. */
+ * with `fileless`, only those carrying no file, and with `only_qn`, only that
+ * node; returns how many. */
 static int gbuf_delete_untouched(cbm_gbuf_t *gb, const char *label, const char *const *types,
-                                 bool fileless) {
+                                 bool fileless, const char *only_qn) {
     node_ptr_array_t *arr = cbm_ht_get(gb->nodes_by_label, label);
     if (!arr || arr->count == 0) {
         return 0;
@@ -1568,7 +1569,8 @@ static int gbuf_delete_untouched(cbm_gbuf_t *gb, const char *label, const char *
     for (int i = 0; i < arr->count; i++) {
         const char *qn = arr->items[i]->qualified_name;
         cbm_gbuf_node_t *node = qn ? cbm_ht_get(gb->node_by_qn, qn) : NULL;
-        if (node && !(fileless && node->file_path && node->file_path[0]) &&
+        if (node && (!only_qn || strcmp(qn, only_qn) == 0) &&
+            !(fileless && node->file_path && node->file_path[0]) &&
             !gbuf_node_touched(gb, node->id, types)) {
             victims[n++] = node;
         }
@@ -1609,7 +1611,7 @@ int cbm_gbuf_delete_unreferenced(cbm_gbuf_t *gb, const char *label, const char *
     if (!gb || !label || !edge_types || !edge_types[0]) {
         return CBM_NOT_FOUND;
     }
-    return gbuf_delete_untouched(gb, label, edge_types, false);
+    return gbuf_delete_untouched(gb, label, edge_types, false, NULL);
 }
 
 typedef struct {
@@ -1623,7 +1625,8 @@ static void collect_edge_type(const char *key, void *value, void *ud) {
     list->items[list->count++] = key;
 }
 
-int cbm_gbuf_delete_edgeless(cbm_gbuf_t *gb, const char *label) {
+static int gbuf_delete_edgeless(cbm_gbuf_t *gb, const char *label, bool fileless_only,
+                                const char *only_qn) {
     if (!gb || !label) {
         return CBM_NOT_FOUND;
     }
@@ -1637,9 +1640,17 @@ int cbm_gbuf_delete_edgeless(cbm_gbuf_t *gb, const char *label) {
         return CBM_NOT_FOUND;
     }
     cbm_ht_foreach(gb->edges_by_type, collect_edge_type, &list);
-    int n = gbuf_delete_untouched(gb, label, list.items, true);
+    int n = gbuf_delete_untouched(gb, label, list.items, fileless_only, only_qn);
     cbm_free(CBM_MEM_CLASS_GBUF_INDEX, list.items);
     return n;
+}
+
+int cbm_gbuf_delete_edgeless(cbm_gbuf_t *gb, const char *label) {
+    return gbuf_delete_edgeless(gb, label, true, NULL);
+}
+
+int cbm_gbuf_delete_edgeless_qn(cbm_gbuf_t *gb, const char *label, const char *qn) {
+    return qn ? gbuf_delete_edgeless(gb, label, false, qn) : CBM_NOT_FOUND;
 }
 
 int cbm_gbuf_load_from_db(cbm_gbuf_t *gb, const char *db_path, const char *project) {

@@ -740,6 +740,82 @@ TEST(handles_jaxrs_java_relative_path) {
     PASS();
 }
 
+/* JAX-RS (Java): the verbs and method paths sit on an interface and the
+ * class-level @Path on the implementation (a common resource/impl split).
+ * The interface alone yields "/{id}" -- a route that is only a placeholder
+ * and names no resource. The route is the implementation's prefix plus the
+ * interface method's path, handled by the implementing method. */
+TEST(handles_jaxrs_java_interface_verbs_impl_path) {
+    static const char *routes[] = {"/widgets/{id}", "/widgets", NULL};
+    static const EtFile f[] = {
+        {"WidgetApi.java",
+         "package com.example;\n\n"
+         "import jakarta.ws.rs.*;\n\n"
+         "public interface WidgetApi {\n"
+         "    @GET\n"
+         "    @Path(\"/{id}\")\n"
+         "    String get(String id);\n\n"
+         "    @DELETE\n"
+         "    String clear();\n}\n"},
+        {"WidgetResource.java",
+         "package com.example;\n\n"
+         "import jakarta.ws.rs.Path;\n\n"
+         "@Path(\"/widgets\")\npublic class WidgetResource implements WidgetApi {\n"
+         "    @Override\n"
+         "    public String get(String id) {\n"
+         "        return id;\n    }\n\n"
+         "    @Override\n"
+         "    public String clear() {\n"
+         "        return \"ok\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_edge_present(f, 2, "HANDLES", 2));
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, false, "__route__GET__/widgets/{}"));
+    PASS();
+}
+
+/* Spring (Java): same split with @GetMapping on the interface and the
+ * class-level @RequestMapping on the controller. */
+TEST(handles_spring_java_interface_mapping_impl_prefix) {
+    static const char *routes[] = {"/api/orders", NULL};
+    static const EtFile f[] = {
+        {"OrderApi.java",
+         "package com.example;\n\n"
+         "import org.springframework.web.bind.annotation.GetMapping;\n\n"
+         "public interface OrderApi {\n"
+         "    @GetMapping(\"/orders\")\n"
+         "    String listOrders();\n}\n"},
+        {"OrderController.java",
+         "package com.example;\n\n"
+         "import org.springframework.web.bind.annotation.RequestMapping;\n\n"
+         "@RequestMapping(\"/api\")\npublic class OrderController implements OrderApi {\n"
+         "    public String listOrders() {\n"
+         "        return \"orders\";\n    }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact_mode(f, 2, routes, false, "__route__GET__/api/orders"));
+    PASS();
+}
+
+/* Negative control: an interface that carries its own class-level @Path
+ * already yields full routes; the implementation's identical @Path must not
+ * prefix them a second time. */
+TEST(handles_jaxrs_java_interface_with_own_path_not_doubled) {
+    static const char *routes[] = {"/widgets/{id}", NULL};
+    static const EtFile f[] = {
+        {"WidgetApi.java",
+         "package com.example;\n\n"
+         "import jakarta.ws.rs.*;\n\n"
+         "@Path(\"/widgets\")\npublic interface WidgetApi {\n"
+         "    @GET\n"
+         "    @Path(\"/{id}\")\n"
+         "    String get(String id);\n}\n"},
+        {"WidgetResource.java",
+         "package com.example;\n\n"
+         "import jakarta.ws.rs.Path;\n\n"
+         "@Path(\"/widgets\")\npublic class WidgetResource implements WidgetApi {\n"
+         "    public String get(String id) {\n"
+         "        return id;\n    }\n}\n"}};
+    ASSERT_TRUE(et_routes_exact(f, 2, routes));
+    PASS();
+}
+
 /* Negative control: the relative-template acceptance is scoped to JAX-RS
  * @Path. A slash-less string on a Spring mapping annotation is still not read
  * as a route path, so the handler keeps the "/" fallback and no "/api/orders"
@@ -3196,6 +3272,9 @@ SUITE(edge_types_probe) {
     RUN_TEST(handles_spring_kotlin);
     RUN_TEST(handles_jaxrs_java);
     RUN_TEST(handles_jaxrs_java_relative_path);
+    RUN_TEST(handles_jaxrs_java_interface_verbs_impl_path);
+    RUN_TEST(handles_spring_java_interface_mapping_impl_prefix);
+    RUN_TEST(handles_jaxrs_java_interface_with_own_path_not_doubled);
     RUN_TEST(handles_spring_java_relative_string_not_route);
     RUN_TEST(handles_jaxrs_scala);
     RUN_TEST(handles_spring_groovy);
