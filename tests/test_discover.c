@@ -284,6 +284,17 @@ TEST(pattern_spec) {
     ASSERT_TRUE(cbm_matches_fast_pattern("App.spec.ts", CBM_MODE_FAST));
     PASS();
 }
+/* ".spec."/".test." mark test sources (App.spec.ts); a YAML/JSON document
+ * so named is an API description or fixture data, e.g. the OpenAPI
+ * api.spec.yaml every generated-client repo carries, and its operations are
+ * the Routes clients bind to. */
+TEST(pattern_spec_document_not_skipped) {
+    ASSERT_FALSE(cbm_matches_fast_pattern("api.spec.yaml", CBM_MODE_MODERATE));
+    ASSERT_FALSE(cbm_matches_fast_pattern("api.spec.yml", CBM_MODE_FAST));
+    ASSERT_FALSE(cbm_matches_fast_pattern("openapi.spec.json", CBM_MODE_MODERATE));
+    ASSERT_TRUE(cbm_matches_fast_pattern("App.spec.ts", CBM_MODE_MODERATE));
+    PASS();
+}
 TEST(pattern_stories) {
     ASSERT_TRUE(cbm_matches_fast_pattern("Button.stories.tsx", CBM_MODE_FAST));
     PASS();
@@ -2439,6 +2450,7 @@ SUITE(discover) {
     RUN_TEST(pattern_mock);
     RUN_TEST(pattern_test_dot);
     RUN_TEST(pattern_spec);
+    RUN_TEST(pattern_spec_document_not_skipped);
     RUN_TEST(pattern_stories);
     RUN_TEST(pattern_dts_full);
 

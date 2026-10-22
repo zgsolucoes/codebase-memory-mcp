@@ -433,7 +433,16 @@ bool cbm_matches_fast_pattern(const char *filename, cbm_index_mode_t mode) {
         return false;
     }
 
+    /* ".spec."/".test." mark test sources; a YAML/JSON document so named is an
+     * API description (OpenAPI api.spec.yaml) or data, not a test. */
+    const char *ext = strrchr(filename, '.');
+    bool document =
+        ext && (strcmp(ext, ".yaml") == 0 || strcmp(ext, ".yml") == 0 || strcmp(ext, ".json") == 0);
     for (int i = 0; FAST_PATTERNS[i]; i++) {
+        if (document &&
+            (strcmp(FAST_PATTERNS[i], ".spec.") == 0 || strcmp(FAST_PATTERNS[i], ".test.") == 0)) {
+            continue;
+        }
         if (str_contains(filename, FAST_PATTERNS[i])) {
             return true;
         }
