@@ -381,6 +381,9 @@ typedef struct {
                                      // (self.compiler.apply_converters()). An object the
                                      // class owns, not a parameter: read by the weak-member
                                      // guard's unique-name exemption. Default false.
+    const char *receiver_type;       // declared type of a member call's receiver when it
+                                     // names a generated API client (<Tag>Api / <Tag>Service,
+                                     // openapi.c); NULL otherwise
 } CBMCall;
 
 // What an import statement names, when the syntax says so. Only PHP's
@@ -1388,6 +1391,9 @@ void cbm_extract_diagram_file(CBMExtractCtx *ctx);
  * a doc link per operationId. Self-gated: openapi.json / swagger.json, and YAML
  * or JSON files whose root says `openapi` or `swagger`. */
 void cbm_extract_openapi(CBMExtractCtx *ctx);
+/* Fill receiver_type of member calls whose receiver is declared with a generated
+ * API client type (Java/Groovy/Kotlin <Tag>Api, TypeScript <Tag>Service). */
+void cbm_extract_client_receiver_types(CBMExtractCtx *ctx);
 
 /* Canonicalize route-path parameter placeholders (":id", "{id}", "<id>",
  * "${...}") to a single "{}" token so that client call sites, server handlers

@@ -3901,6 +3901,8 @@ static CBMFileResult *extract_file_ex_body(const char *source, int source_len, C
 
     // OpenAPI operations as Routes (self-gated: API description documents).
     cbm_extract_openapi(&ctx);
+    // Receivers declared with a generated API client type (self-gated by language).
+    cbm_extract_client_receiver_types(&ctx);
 
     // K8s / Kustomize semantic pass (additional structured extraction for YAML-based infra files).
     if (ctx.language == CBM_LANG_KUSTOMIZE || ctx.language == CBM_LANG_K8S) {

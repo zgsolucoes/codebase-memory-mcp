@@ -1016,7 +1016,7 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
     }
     /* A generated OpenAPI client call names its operation, not a URL; its
      * CALLS edge (if any) is left as is. MUST match pass_parallel.c. */
-    (void)cbm_pipeline_openapi_client_call(ctx->gbuf, source_node, call, &res);
+    (void)cbm_pipeline_openapi_client_call(ctx->gbuf, ctx->gbuf, source_node, call, &res);
     /* A call that starts another program (subprocess.run, exec.Command,
      * posix_spawn): a SPAWNS edge to its Process node instead of a CALLS
      * edge. MUST match pass_parallel.c. */

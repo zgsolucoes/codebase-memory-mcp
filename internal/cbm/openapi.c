@@ -16,6 +16,7 @@
  */
 #include "cbm.h"
 #include "doclink.h"
+#include "helpers.h" // cbm_node_text
 
 #include "arena.h"
 #include "foundation/constants.h"
@@ -290,6 +291,200 @@ void cbm_extract_openapi(CBMExtractCtx *ctx) {
             TSNode op = oa_mapping(ts_node_child_by_field_name(mp, "value", CBM_SZ_5));
             if (!ts_node_is_null(op)) {
                 oa_operation(ctx, full, key, op, item, mp);
+            }
+        }
+    }
+}
+
+/* ── Generated API client receivers ───────────────────────────────
+ *
+ * openapi-generator names a client after the operation's tag: <Tag>Api in
+ * Java/Kotlin, <Tag>Service in typescript-angular, and the method after the
+ * operationId. A call through a variable of that type (`faturamento.reviewFiles()`,
+ * `this._userService.findUserByUsername()`) is a call to that operation,
+ * whatever the variable is named. The file's declarations give the type:
+ * fields, parameters (TypeScript constructor parameter properties included),
+ * locals and `inject(Type)`.
+ * shortcut: one name -> type table per file, not per scope; a name declared
+ * with two client types is left out. */
+
+enum { RT_MAX = 512, RT_NODE_BUDGET = 2000000 };
+#define RT_FIELD(n, f) ts_node_child_by_field_name(n, f, (uint32_t)strlen(f))
+
+typedef struct {
+    const char *name[RT_MAX];
+    const char *type[RT_MAX]; /* "" = ambiguous */
+    int count;
+} rt_table_t;
+
+/* Last segment of a type's text, generics and array suffix dropped:
+ * "com.x.BillingApi<T>[]" -> "BillingApi". */
+static const char *rt_type_name(CBMExtractCtx *ctx, TSNode type) {
+    char buf[OA_SCALAR_MAX];
+    uint32_t b = ts_node_start_byte(type);
+    uint32_t e = ts_node_end_byte(type);
+    size_t n = 0;
+    for (uint32_t i = b; i < e && n + 1 < sizeof(buf); i++) {
+        char c = ctx->source[i];
+        if (c == '<' || c == '[' || c == '|' || c == '(') {
+            break;
+        }
+        if (c == '.') {
+            n = 0;
+        } else if (isalnum((unsigned char)c) || c == '_' || c == '$') {
+            buf[n++] = c;
+        }
+    }
+    buf[n] = '\0';
+    return n ? cbm_arena_strndup(ctx->arena, buf, n) : NULL;
+}
+
+static bool rt_is_client_type(const char *t, CBMLanguage lang) {
+    const char *suffix = (lang == CBM_LANG_TYPESCRIPT || lang == CBM_LANG_TSX) ? "Service" : "Api";
+    size_t tl = t ? strlen(t) : 0;
+    size_t sl = strlen(suffix);
+    return tl > sl && isupper((unsigned char)t[0]) && strcmp(t + tl - sl, suffix) == 0;
+}
+
+static void rt_add(CBMExtractCtx *ctx, rt_table_t *t, TSNode name, const char *type) {
+    if (ts_node_is_null(name) || !type || !rt_is_client_type(type, ctx->language)) {
+        return;
+    }
+    const char *nm = cbm_node_text(ctx->arena, name, ctx->source);
+    for (int i = 0; nm && i < t->count; i++) {
+        if (strcmp(t->name[i], nm) == 0) {
+            if (strcmp(t->type[i], type) != 0) {
+                t->type[i] = "";
+            }
+            return;
+        }
+    }
+    if (nm && t->count < RT_MAX) {
+        t->name[t->count] = nm;
+        t->type[t->count] = type;
+        t->count++;
+    }
+}
+
+/* The type of a TypeScript type_annotation (": UserService"). */
+static const char *rt_ts_annotation(CBMExtractCtx *ctx, TSNode ann) {
+    if (ts_node_is_null(ann)) {
+        return NULL;
+    }
+    TSNode inner = oa_is(ann, "type_annotation") ? ts_node_named_child(ann, 0) : ann;
+    return ts_node_is_null(inner) ? NULL : rt_type_name(ctx, inner);
+}
+
+/* `inject(UserService)` -> "UserService". */
+static const char *rt_ts_inject(CBMExtractCtx *ctx, TSNode value) {
+    if (!oa_is(value, "call_expression")) {
+        return NULL;
+    }
+    TSNode fn = RT_FIELD(value, "function");
+    TSNode args = RT_FIELD(value, "arguments");
+    if (ts_node_is_null(fn) || ts_node_end_byte(fn) - ts_node_start_byte(fn) != strlen("inject") ||
+        strncmp(ctx->source + ts_node_start_byte(fn), "inject", strlen("inject")) != 0 ||
+        ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
+        return NULL;
+    }
+    return rt_type_name(ctx, ts_node_named_child(args, 0));
+}
+
+static void rt_collect(CBMExtractCtx *ctx, TSNode n, rt_table_t *t) {
+    const char *k = ts_node_type(n);
+    TSNode type = RT_FIELD(n, "type");
+    if (ctx->language == CBM_LANG_TYPESCRIPT || ctx->language == CBM_LANG_TSX) {
+        if (strcmp(k, "required_parameter") == 0 || strcmp(k, "optional_parameter") == 0) {
+            rt_add(ctx, t, RT_FIELD(n, "pattern"), rt_ts_annotation(ctx, type));
+        } else if (strcmp(k, "public_field_definition") == 0 ||
+                   strcmp(k, "variable_declarator") == 0) {
+            TSNode name = RT_FIELD(n, "name");
+            const char *ty = rt_ts_annotation(ctx, type);
+            rt_add(ctx, t, name, ty ? ty : rt_ts_inject(ctx, RT_FIELD(n, "value")));
+        }
+        return;
+    }
+    if (ts_node_is_null(type)) {
+        return;
+    }
+    const char *ty = rt_type_name(ctx, type);
+    if (strcmp(k, "field_declaration") == 0 || strcmp(k, "local_variable_declaration") == 0) {
+        uint32_t nc = ts_node_named_child_count(n); /* Java: one type, many declarators */
+        for (uint32_t i = 0; i < nc; i++) {
+            TSNode d = ts_node_named_child(n, i);
+            if (oa_is(d, "variable_declarator")) {
+                rt_add(ctx, t, RT_FIELD(d, "name"), ty);
+            }
+        }
+    } else if (strcmp(k, "formal_parameter") == 0 || strcmp(k, "declaration") == 0 ||
+               strcmp(k, "parameter") == 0) {
+        rt_add(ctx, t, RT_FIELD(n, "name"), ty);
+    }
+}
+
+/* Receiver of "x.op" / "this.x.op": the x segment, or NULL. */
+static bool rt_receiver(const char *callee, char *out, size_t out_sz) {
+    const char *op = callee ? strrchr(callee, '.') : NULL;
+    if (!op || op == callee) {
+        return false;
+    }
+    const char *recv = callee;
+    if (strncmp(recv, "this.", strlen("this.")) == 0) {
+        recv += strlen("this.");
+    }
+    size_t len = (size_t)(op - recv);
+    if (len == 0 || len >= out_sz || memchr(recv, '.', len)) {
+        return false;
+    }
+    memcpy(out, recv, len);
+    out[len] = '\0';
+    return true;
+}
+
+void cbm_extract_client_receiver_types(CBMExtractCtx *ctx) {
+    if (!ctx || !ctx->result || ts_node_is_null(ctx->root) ||
+        (ctx->language != CBM_LANG_JAVA && ctx->language != CBM_LANG_GROOVY &&
+         ctx->language != CBM_LANG_KOTLIN && ctx->language != CBM_LANG_TYPESCRIPT &&
+         ctx->language != CBM_LANG_TSX)) {
+        return;
+    }
+    CBMCallArray *calls = &ctx->result->calls;
+    bool any = false;
+    for (int i = 0; i < calls->count && !any; i++) {
+        any = calls->items[i].callee_name && strchr(calls->items[i].callee_name, '.');
+    }
+    if (!any) {
+        return;
+    }
+    rt_table_t *t = (rt_table_t *)cbm_arena_alloc(ctx->arena, sizeof(rt_table_t));
+    if (!t) {
+        return;
+    }
+    t->count = 0;
+    TSTreeCursor cur = ts_tree_cursor_new(ctx->root);
+    int visited = 0;
+    for (bool more = true; more && visited < RT_NODE_BUDGET; visited++) {
+        rt_collect(ctx, ts_tree_cursor_current_node(&cur), t);
+        if (ts_tree_cursor_goto_first_child(&cur)) {
+            continue;
+        }
+        while (!ts_tree_cursor_goto_next_sibling(&cur)) {
+            if (!ts_tree_cursor_goto_parent(&cur)) {
+                more = false;
+                break;
+            }
+        }
+    }
+    ts_tree_cursor_delete(&cur);
+    for (int i = 0; i < calls->count && t->count > 0; i++) {
+        char recv[OA_SCALAR_MAX];
+        if (!rt_receiver(calls->items[i].callee_name, recv, sizeof(recv))) {
+            continue;
+        }
+        for (int j = 0; j < t->count; j++) {
+            if (t->type[j][0] && strcmp(t->name[j], recv) == 0) {
+                calls->items[i].receiver_type = t->type[j];
+                break;
             }
         }
     }

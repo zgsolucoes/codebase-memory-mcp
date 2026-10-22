@@ -1296,24 +1296,31 @@ static void create_sveltekit_routes(cbm_gbuf_t *gb) {
  * declared type when the resolver exposes field types here. */
 enum { OA_GUESS_CONF_PCT = 50 };
 
-bool cbm_pipeline_openapi_client_call(cbm_gbuf_t *gb, const cbm_gbuf_node_t *source,
-                                      const CBMCall *call, const cbm_resolution_t *res) {
-    if (!gb || !source || !call || !call->callee_name ||
-        (res && res->qualified_name && res->qualified_name[0] &&
-         res->confidence * 100.0 >= OA_GUESS_CONF_PCT)) {
+/* True when the project itself defines a class/interface named `type`: then
+ * it is the project's own wrapper, not a generated client. */
+static bool oa_type_in_project(const cbm_gbuf_t *defs, const char *type) {
+    const cbm_gbuf_node_t **nodes = NULL;
+    int count = 0;
+    if (!defs || !type[0] || cbm_gbuf_find_by_name(defs, type, &nodes, &count) != 0) {
+        return false;
+    }
+    for (int i = 0; i < count; i++) {
+        const char *l = nodes[i]->label;
+        if (l && (strcmp(l, "Class") == 0 || strcmp(l, "Interface") == 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool cbm_pipeline_openapi_client_call(cbm_gbuf_t *gb, const cbm_gbuf_t *defs,
+                                      const cbm_gbuf_node_t *source, const CBMCall *call,
+                                      const cbm_resolution_t *res) {
+    if (!gb || !source || !call || !call->callee_name) {
         return false;
     }
     const char *op = strrchr(call->callee_name, '.');
     if (!op || op == call->callee_name || !islower((unsigned char)op[1])) {
-        return false;
-    }
-    const char *recv = op;
-    while (recv > call->callee_name && (isalnum((unsigned char)recv[-1]) || recv[-1] == '_')) {
-        recv--;
-    }
-    size_t rlen = (size_t)(op - recv);
-    if (rlen <= strlen("Api") || strncmp(op - strlen("Api"), "Api", strlen("Api")) != 0 ||
-        !islower((unsigned char)recv[0])) {
         return false;
     }
     for (const char *c = op + 1; *c; c++) {
@@ -1321,9 +1328,35 @@ bool cbm_pipeline_openapi_client_call(cbm_gbuf_t *gb, const cbm_gbuf_node_t *sou
             return false;
         }
     }
+    /* The declared type names the client; without one, a receiver named after
+     * its API class (reviewExecutionApi) does, when the callee is unresolved
+     * or only name-guessed. */
+    char type[CBM_SZ_256];
+    if (call->receiver_type && call->receiver_type[0]) {
+        (void)snprintf(type, sizeof(type), "%s", call->receiver_type);
+    } else {
+        if (res && res->qualified_name && res->qualified_name[0] &&
+            res->confidence * 100.0 >= OA_GUESS_CONF_PCT) {
+            return false;
+        }
+        const char *recv = op;
+        while (recv > call->callee_name && (isalnum((unsigned char)recv[-1]) || recv[-1] == '_')) {
+            recv--;
+        }
+        size_t rlen = (size_t)(op - recv);
+        if (rlen <= strlen("Api") || rlen >= sizeof(type) ||
+            strncmp(op - strlen("Api"), "Api", strlen("Api")) != 0 ||
+            !islower((unsigned char)recv[0])) {
+            return false;
+        }
+        (void)snprintf(type, sizeof(type), "%c%.*s", toupper((unsigned char)recv[0]), (int)rlen - 1,
+                       recv + 1);
+    }
+    if (oa_type_in_project(defs, type)) {
+        return false;
+    }
     char name[CBM_SZ_256];
-    (void)snprintf(name, sizeof(name), "%c%.*s.%s", toupper((unsigned char)recv[0]), (int)rlen - 1,
-                   recv + 1, op + 1);
+    (void)snprintf(name, sizeof(name), "%s.%s", type, op + 1);
     char qn[CBM_ROUTE_QN_SIZE];
     (void)snprintf(qn, sizeof(qn), "__route__OPENAPI__%s", name);
     int64_t rid = cbm_gbuf_upsert_node(gb, "Route", name, qn, "", 0, 0,

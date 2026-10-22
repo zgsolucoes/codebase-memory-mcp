@@ -286,6 +286,7 @@ static void cr_walk_call(cr_ctx_t *c, CBMCall *call) {
     cr_str(c, &call->enclosing_func_qn);
     cr_str(c, &call->first_string_arg);
     cr_str(c, &call->second_arg_name);
+    cr_str(c, &call->receiver_type);
     int argc = call->arg_count;
     if (argc > CBM_MAX_CALL_ARGS) {
         argc = CBM_MAX_CALL_ARGS;
