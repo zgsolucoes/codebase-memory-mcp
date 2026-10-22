@@ -469,6 +469,30 @@ TSNode cbm_find_child_by_kind(TSNode parent, const char *kind) {
     return null_node;
 }
 
+bool cbm_is_jvm_constant_ref(const char *text) {
+    const char *last = text ? strrchr(text, '.') : NULL;
+    if (!last || !last[SKIP_ONE]) {
+        return false;
+    }
+    bool seg_start = true;
+    for (const char *p = text; p < last; p++) {
+        if (*p == '.') {
+            seg_start = true;
+        } else if (seg_start ? !isupper((unsigned char)*p)
+                             : !isalnum((unsigned char)*p) && *p != '_') {
+            return false;
+        } else {
+            seg_start = false;
+        }
+    }
+    for (const char *p = last + SKIP_ONE; *p; p++) {
+        if (!isupper((unsigned char)*p) && !isdigit((unsigned char)*p) && *p != '_') {
+            return false;
+        }
+    }
+    return isupper((unsigned char)last[SKIP_ONE]) != 0;
+}
+
 int cbm_find_children_by_kind(TSNode parent, const char *kind, TSNode *out, int max) {
     int n = 0;
     uint32_t count = ts_node_child_count(parent);

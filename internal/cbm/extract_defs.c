@@ -3734,7 +3734,8 @@ static const char *class_string_constant(CBMArena *a, TSNode class_node, const c
 
 /* A topic value: a string literal, or a reference (`NAME`, `Owner.NAME`,
  * alone or as the first element of an array) to a string constant of the
- * enclosing class. A foreign `Other.NAME` stays unresolved. */
+ * enclosing class. A foreign `Other.NAME` keys the topic by that symbol,
+ * which a producer sending the same constant also builds (extract_calls.c). */
 static const char *topic_value(CBMArena *a, TSNode v, TSNode class_node, const char *source) {
     const char *lit = first_string_literal(a, v, source);
     if (lit || ts_node_is_null(class_node)) {
@@ -3752,11 +3753,12 @@ static const char *topic_value(CBMArena *a, TSNode v, TSNode class_node, const c
     char *ref = cbm_node_text(a, v, source);
     char *dot = ref ? strrchr(ref, '.') : NULL;
     if (dot) {
+        const char *symbol = cbm_is_jvm_constant_ref(ref) ? cbm_arena_strdup(a, ref) : NULL;
         *dot = '\0';
         TSNode cn = ts_node_child_by_field_name(class_node, TS_FIELD("name"));
         const char *owner = ts_node_is_null(cn) ? NULL : cbm_node_text(a, cn, source);
         if (!owner || strcmp(owner, ref) != 0) {
-            return NULL;
+            return symbol;
         }
         ref = dot + SKIP_CHAR;
     }
