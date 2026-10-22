@@ -2583,7 +2583,32 @@ static bool zg_rest_client_callee(const char *callee) {
     return false;
 }
 
-static void zg_rest_client_path(CBMExtractCtx *ctx, CBMCall *call) {
+/* Value of string constant `name` declared in the Groovy class enclosing
+ * node (`private static final String API = 'integrador'`), or NULL. */
+static const char *groovy_class_string_constant(CBMExtractCtx *ctx, TSNode node, const char *name,
+                                                size_t name_len) {
+    while (!ts_node_is_null(node) && strcmp(ts_node_type(node), "class_definition") != 0) {
+        node = ts_node_parent(node);
+    }
+    TSNode body =
+        ts_node_is_null(node) ? node : ts_node_child_by_field_name(node, TS_FIELD("body"));
+    uint32_t n = ts_node_is_null(body) ? 0 : ts_node_named_child_count(body);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode decl = ts_node_named_child(body, i);
+        TSNode dn = ts_node_child_by_field_name(decl, TS_FIELD("name"));
+        TSNode dv = ts_node_child_by_field_name(decl, TS_FIELD("value"));
+        if (strcmp(ts_node_type(decl), "declaration") != 0 || ts_node_is_null(dn) ||
+            ts_node_is_null(dv) || strcmp(ts_node_type(dv), "string") != 0 ||
+            ts_node_end_byte(dn) - ts_node_start_byte(dn) != name_len ||
+            strncmp(ctx->source + ts_node_start_byte(dn), name, name_len) != 0) {
+            continue;
+        }
+        return strip_quotes(ctx->arena, cbm_node_text(ctx->arena, dv, ctx->source));
+    }
+    return NULL;
+}
+
+static void zg_rest_client_path(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
     if (ctx->language != CBM_LANG_GROOVY || !zg_rest_client_callee(call->callee_name)) {
         return;
     }
@@ -2600,9 +2625,18 @@ static void zg_rest_client_path(CBMExtractCtx *ctx, CBMCall *call) {
         e += (*e == '/') ? 1 : 0;
         while (*e && *e != quote && n + 3 < sizeof(buf)) {
             if (*e == '$' && quote == '"') { /* GString interpolation -> {} */
-                buf[n++] = '{';
-                buf[n++] = '}';
-                if (*++e == '{') {
+                bool braced = *++e == '{';
+                const char *id = e + (braced ? 1 : 0);
+                const char *id_end = id;
+                while (isalnum((unsigned char)*id_end) || *id_end == '_') {
+                    id_end++;
+                }
+                /* a class constant ("${API}") keeps its value; anything else is one parameter */
+                const char *k = groovy_class_string_constant(ctx, args, id, (size_t)(id_end - id));
+                for (const char *v = k ? k : "{}"; *v && n + 3 < sizeof(buf); v++) {
+                    buf[n++] = *v;
+                }
+                if (braced) {
                     while (*e && *e != '}') {
                         e++;
                     }
@@ -2699,7 +2733,7 @@ static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
             call->arg_count++;
         }
     }
-    zg_rest_client_path(ctx, call);
+    zg_rest_client_path(ctx, args, call);
 }
 
 // Check if a keyword name matches URL or topic patterns.
