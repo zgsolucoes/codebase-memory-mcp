@@ -3424,6 +3424,9 @@ static void resolve_file_calls(resolve_ctx_t *rc, resolve_worker_state_t *ws, CB
                                                  call->callee_is_locally_bound, res.strategy) ||
             cbm_go_suppress_weak_method_match(lang == CBM_LANG_GO, call->is_method, res.strategy,
                                               res.confidence) ||
+            /* MUST match pass_calls.c exactly. */
+            cbm_groovy_suppress_receiver_mismatch(lang == CBM_LANG_GROOVY, call->callee_name,
+                                                  res.strategy, res.qualified_name) ||
             /* Import-binding suppression (#2127) — see pass_calls.c; this gate
              * MUST stay identical to the one there. */
             (lang == CBM_LANG_PYTHON &&

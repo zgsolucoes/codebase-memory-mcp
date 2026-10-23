@@ -2005,6 +2005,38 @@ TEST(go_suppress_drops_weak_selector_matches) {
     PASS();
 }
 
+TEST(groovy_suppress_receiver_name_mismatch) {
+    /* Injected bean of a library class bound by name to an unrelated project
+     * method (submission-manager: outboxService.saveOutboxEvent ->
+     * UploadService.saveOutboxEvent). */
+    ASSERT_TRUE(
+        cbm_groovy_suppress_receiver_mismatch(true, "outboxService.saveOutboxEvent", "unique_name",
+                                              "p.svc.UploadService.UploadService.saveOutboxEvent"));
+    ASSERT_TRUE(cbm_groovy_suppress_receiver_mismatch(
+        true, "this.outboxService.saveOutboxEvent", "suffix_match",
+        "p.svc.UploadService.UploadService.saveOutboxEvent"));
+    PASS();
+}
+
+TEST(groovy_suppress_keeps_matching_receivers) {
+    const char *qn = "p.svc.BillingFileService.BillingFileService.save";
+    ASSERT_FALSE(
+        cbm_groovy_suppress_receiver_mismatch(true, "billingFileService.save", "unique_name", qn));
+    ASSERT_FALSE(cbm_groovy_suppress_receiver_mismatch(true, "service.save", "unique_name", qn));
+    ASSERT_FALSE(
+        cbm_groovy_suppress_receiver_mismatch(true, "BillingFileService.save", "unique_name", qn));
+    /* no receiver, or one that is not a plain name: nothing to judge */
+    ASSERT_FALSE(cbm_groovy_suppress_receiver_mismatch(true, "save", "unique_name", qn));
+    ASSERT_FALSE(cbm_groovy_suppress_receiver_mismatch(true, "this.save", "unique_name", qn));
+    ASSERT_FALSE(cbm_groovy_suppress_receiver_mismatch(true, "find().save", "unique_name", qn));
+    /* strong strategies and other languages are untouched */
+    ASSERT_FALSE(
+        cbm_groovy_suppress_receiver_mismatch(true, "outboxService.save", "import_map", qn));
+    ASSERT_FALSE(
+        cbm_groovy_suppress_receiver_mismatch(false, "outboxService.save", "unique_name", qn));
+    PASS();
+}
+
 TEST(go_suppress_keeps_typed_and_import_aware_matches) {
     /* Unpenalized unique_name = lone candidate inside the caller's import
      * closure (or an import-free file, e.g. same-package) — a genuinely-typed
@@ -2596,6 +2628,8 @@ SUITE(registry) {
     RUN_TEST(external_import_shadow_declared_prefix_is_permissive);
     RUN_TEST(go_suppress_drops_weak_selector_matches);
     RUN_TEST(go_suppress_keeps_typed_and_import_aware_matches);
+    RUN_TEST(groovy_suppress_receiver_name_mismatch);
+    RUN_TEST(groovy_suppress_keeps_matching_receivers);
     RUN_TEST(registry_python_function_local_is_exact_only_issue1548);
     RUN_TEST(registry_resolve_lexical_walks_enclosing_defs_issue1548);
     RUN_TEST(registry_python_local_bound_at_own_file_issue1548);

@@ -986,6 +986,65 @@ bool cbm_suppress_external_import_shadow(const char *callee_name, const char *st
     return external_binding;
 }
 
+static bool groovy_ident_char(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' ||
+           c == '$';
+}
+
+bool cbm_groovy_suppress_receiver_mismatch(bool is_groovy, const char *callee_name,
+                                           const char *strategy, const char *target_qn) {
+    /* Groovy has no LSP, so `outboxService.saveOutboxEvent(x)` on an injected
+     * bean whose class lives in a library reaches the registry by name alone,
+     * and unique_name binds it to the one same-named project method of an
+     * unrelated class (UploadService.saveOutboxEvent: 92 fabricated callers on
+     * a private method). Grails/Spring inject beans under their class name, so
+     * a weak pick is kept only when the target class ends with the capitalized
+     * receiver (`billingFileService` -> BillingFileService, `service` ->
+     * BillingFileService, `Foo.bar()` -> Foo). */
+    if (!is_groovy || !callee_name || !target_qn || !weak_short_name_strategy(strategy)) {
+        return false;
+    }
+    const char *dot = strrchr(callee_name, '.');
+    if (!dot) {
+        return false; /* bare call: the enclosing class, no receiver to judge */
+    }
+    const char *recv = dot;
+    while (recv > callee_name && recv[-1] != '.') {
+        recv--;
+    }
+    size_t rlen = (size_t)(dot - recv);
+    if (rlen == 0 || rlen >= CBM_SZ_256) {
+        return false;
+    }
+    for (size_t i = 0; i < rlen; i++) {
+        if (!groovy_ident_char(recv[i])) {
+            return false; /* `a().b()`, `xs[0].b()`: receiver is not a name */
+        }
+    }
+    if ((rlen == 4 && strncmp(recv, "this", 4) == 0) ||
+        (rlen == 5 && strncmp(recv, "super", 5) == 0)) {
+        return false;
+    }
+    const char *tdot = strrchr(target_qn, '.');
+    if (!tdot) {
+        return false;
+    }
+    const char *cls = tdot;
+    while (cls > target_qn && cls[-1] != '.') {
+        cls--;
+    }
+    size_t clen = (size_t)(tdot - cls);
+    if (clen < rlen) {
+        return true;
+    }
+    const char *tail = cls + (clen - rlen);
+    char first = recv[0];
+    if (first >= 'a' && first <= 'z') {
+        first = (char)(first - ('a' - 'A'));
+    }
+    return tail[0] != first || strncmp(tail + 1, recv + 1, rlen - 1) != 0;
+}
+
 bool cbm_go_suppress_weak_method_match(bool is_go, bool is_method, const char *strategy,
                                        double confidence) {
     /* Go analog of the TS/JS guard above, same failure class: a selector call
