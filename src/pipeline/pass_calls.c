@@ -1161,6 +1161,9 @@ static int resolve_single_call(cbm_pipeline_ctx_t *ctx, CBMCall *call, const CBM
                                              call->callee_is_locally_bound, res.strategy) ||
         cbm_go_suppress_weak_method_match(lang == CBM_LANG_GO, call->is_method, res.strategy,
                                           res.confidence) ||
+        /* MUST match pass_parallel.c exactly. */
+        cbm_groovy_suppress_receiver_mismatch(lang == CBM_LANG_GROOVY, call->callee_name,
+                                              res.strategy, res.qualified_name) ||
         /* Import-binding suppression (#2127): an external `from m import f`
          * binds `f` for the whole module, so a weak short-name match onto a
          * project `X.f` outside m is fabricated. Python-only (the import

@@ -441,6 +441,13 @@ bool cbm_suppress_external_import_shadow(const char *callee_name, const char *st
 bool cbm_go_suppress_weak_method_match(bool is_go, bool is_method, const char *strategy,
                                        double confidence);
 
+/* Groovy weak-member guard: true when a receiver-blind short-name strategy
+ * bound `recv.m()` to a method whose class does not end with the capitalized
+ * receiver name (`outboxService.save()` -> UploadService.save). Bare calls and
+ * this/super/non-name receivers are never suppressed. */
+bool cbm_groovy_suppress_receiver_mismatch(bool is_groovy, const char *callee_name,
+                                           const char *strategy, const char *target_qn);
+
 /* Import-binding counterpart (#2127). True when the callee's root identifier
  * is bound by an import of this file whose module chain contradicts the
  * resolved target (`from unittest.mock import patch; patch()` must not bind a
