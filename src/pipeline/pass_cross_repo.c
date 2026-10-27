@@ -376,11 +376,14 @@ static bool lookup_node_info(struct sqlite3 *db, int64_t node_id, char *name_out
 
 /* ── Phase A: HTTP Route matching ────────────────────────────────── */
 
-/* Find a Route node in target_store by QN and return the handler function's
- * node id, name, and file_path via HANDLES edges. Returns 0 if not found. */
-static int64_t find_route_handler(cbm_store_t *target_store, const char *route_qn,
-                                  char *handler_name, size_t name_sz, char *handler_file,
-                                  size_t file_sz, bool *failed) {
+/* Find a Route node of target_project in target_store by QN and return the
+ * handler function's node id, name, and file_path via HANDLES edges. Returns 0
+ * if not found. The project filter keeps other projects' rows in the same .db
+ * (the "::missed" shadow) out and lets the lookup use UNIQUE(project, qn);
+ * without it every lookup scanned the whole nodes table. */
+static int64_t find_route_handler(cbm_store_t *target_store, const char *target_project,
+                                  const char *route_qn, char *handler_name, size_t name_sz,
+                                  char *handler_file, size_t file_sz, bool *failed) {
     *failed = false;
     handler_name[0] = '\0';
     handler_file[0] = '\0';
@@ -393,12 +396,15 @@ static int64_t find_route_handler(cbm_store_t *target_store, const char *route_q
     /* Find Route node by QN */
     sqlite3_stmt *s = NULL;
     if (sqlite3_prepare_v2(
-            db, "SELECT id FROM nodes WHERE qualified_name = ?1 AND label = 'Route' LIMIT 1",
+            db,
+            "SELECT id FROM nodes WHERE project = ?1 AND qualified_name = ?2 AND label = 'Route' "
+            "LIMIT 1",
             CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
         *failed = true;
         return 0;
     }
-    if (sqlite3_bind_text(s, SKIP_ONE, route_qn, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
+    if (sqlite3_bind_text(s, SKIP_ONE, target_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(s, PAIR_LEN, route_qn, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
         sqlite3_finalize(s);
         *failed = true;
         return 0;
@@ -504,14 +510,14 @@ static bool cr_path_matches_template(const char *concrete, const char *templ) {
  * the route QN into out_qn and return the handler id; returns 0 on no match.
  *
  * COST: this scans every Route node of the target project once per unmatched
- * HTTP_CALLS edge — O(calls × routes) per project pair. It only runs for edges
- * the exact lookup missed; no row count stops a scan (a cap decided which
- * calls were matched at all); revisit with a prepared template index if
- * cross-repo matching ever shows up in profiles. (#523) */
-static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *concrete_path,
-                                        const char *method, char *out_qn, size_t out_qn_sz,
-                                        char *handler_name, size_t name_sz, char *handler_file,
-                                        size_t file_sz, bool *failed, cr_run_context_t *ctx) {
+ * HTTP_CALLS edge — O(calls × routes) per project pair, read through the
+ * (project, label) index. It only runs for edges the exact lookup missed; no
+ * row count stops a scan (a cap decided which calls were matched at all). (#523) */
+static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *target_project,
+                                        const char *concrete_path, const char *method, char *out_qn,
+                                        size_t out_qn_sz, char *handler_name, size_t name_sz,
+                                        char *handler_file, size_t file_sz, bool *failed,
+                                        cr_run_context_t *ctx) {
     *failed = false;
     struct sqlite3 *db = cbm_store_get_db(target_store);
     if (!db || !concrete_path || !concrete_path[0]) {
@@ -521,8 +527,16 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
         return 0;
     }
     sqlite3_stmt *s = NULL;
-    if (sqlite3_prepare_v2(db, "SELECT qualified_name FROM nodes WHERE label = 'Route' ORDER BY id",
-                           CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(
+            db,
+            "SELECT qualified_name FROM nodes WHERE project = ?1 AND label = 'Route' "
+            "ORDER BY id",
+            CBM_NOT_FOUND, &s, NULL) != SQLITE_OK) {
+        *failed = true;
+        return 0;
+    }
+    if (sqlite3_bind_text(s, SKIP_ONE, target_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
+        sqlite3_finalize(s);
         *failed = true;
         return 0;
     }
@@ -557,8 +571,8 @@ static int64_t find_route_handler_fuzzy(cbm_store_t *target_store, const char *c
          * "{id}" variant and its canonical "{}" form). Only accept a Route that
          * actually has a HANDLES edge — the handler is attached to the
          * canonical node. Keep scanning otherwise. */
-        int64_t hid = find_route_handler(target_store, qn, handler_name, name_sz, handler_file,
-                                         file_sz, failed);
+        int64_t hid = find_route_handler(target_store, target_project, qn, handler_name, name_sz,
+                                         handler_file, file_sz, failed);
         if (*failed) {
             step_rc = SQLITE_DONE;
             break;
@@ -605,11 +619,13 @@ static bool emit_cross_route_bidirectional(
         return false;
     }
     sqlite3_stmt *rq = NULL;
-    if (sqlite3_prepare_v2(tgt_db, "SELECT id FROM nodes WHERE qualified_name = ?1 LIMIT 1",
-                           CBM_NOT_FOUND, &rq, NULL) != SQLITE_OK) {
+    if (sqlite3_prepare_v2(
+            tgt_db, "SELECT id FROM nodes WHERE project = ?1 AND qualified_name = ?2 LIMIT 1",
+            CBM_NOT_FOUND, &rq, NULL) != SQLITE_OK) {
         return false;
     }
-    if (sqlite3_bind_text(rq, SKIP_ONE, route_qn, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
+    if (sqlite3_bind_text(rq, SKIP_ONE, tgt_project, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_text(rq, PAIR_LEN, route_qn, CBM_NOT_FOUND, SQLITE_STATIC) != SQLITE_OK) {
         sqlite3_finalize(rq);
         return false;
     }
@@ -648,20 +664,21 @@ typedef struct {
  * store: exact method QN, then ANY, then segment-wise template matching,
  * since a concrete client path ("/v2/orders/123") never exact-matches a
  * templated route ("/v2/orders/{}") (#523). Returns the handler id, or 0. */
-static int64_t resolve_route_handler(cbm_store_t *store, const char *method, const char *curl,
-                                     cr_route_hit_t *hit, bool *failed, cr_run_context_t *ctx) {
+static int64_t resolve_route_handler(cbm_store_t *store, const char *project, const char *method,
+                                     const char *curl, cr_route_hit_t *hit, bool *failed,
+                                     cr_run_context_t *ctx) {
     snprintf(hit->qn, sizeof(hit->qn), "__route__%s__%s", method[0] ? method : "ANY", curl);
-    int64_t handler_id = find_route_handler(store, hit->qn, hit->name, sizeof(hit->name), hit->file,
-                                            sizeof(hit->file), failed);
+    int64_t handler_id = find_route_handler(store, project, hit->qn, hit->name, sizeof(hit->name),
+                                            hit->file, sizeof(hit->file), failed);
     if (!*failed && handler_id == 0) {
         snprintf(hit->qn, sizeof(hit->qn), "__route__ANY__%s", curl);
-        handler_id = find_route_handler(store, hit->qn, hit->name, sizeof(hit->name), hit->file,
-                                        sizeof(hit->file), failed);
+        handler_id = find_route_handler(store, project, hit->qn, hit->name, sizeof(hit->name),
+                                        hit->file, sizeof(hit->file), failed);
     }
     if (!*failed && handler_id == 0) {
-        handler_id = find_route_handler_fuzzy(store, curl, method[0] ? method : NULL, hit->qn,
-                                              sizeof(hit->qn), hit->name, sizeof(hit->name),
-                                              hit->file, sizeof(hit->file), failed, ctx);
+        handler_id = find_route_handler_fuzzy(
+            store, project, curl, method[0] ? method : NULL, hit->qn, sizeof(hit->qn), hit->name,
+            sizeof(hit->name), hit->file, sizeof(hit->file), failed, ctx);
     }
     return *failed ? 0 : handler_id;
 }
@@ -708,7 +725,7 @@ static bool call_served_locally(cbm_store_t *src_store, struct sqlite3 *src_db,
         return !*failed;
     }
     cr_route_hit_t local;
-    return resolve_route_handler(src_store, method, curl, &local, failed, ctx) != 0;
+    return resolve_route_handler(src_store, src_project, method, curl, &local, failed, ctx) != 0;
 }
 
 /* Key of a generated-client operation: the tag lowercased to its letters and
@@ -886,7 +903,7 @@ static cr_match_result_t match_http_routes(cbm_store_t *src_store, const char *s
 
         cr_route_hit_t hit;
         int64_t handler_id =
-            resolve_route_handler(tgt_store, method, curl, &hit, &query_failed, ctx);
+            resolve_route_handler(tgt_store, tgt_project, method, curl, &hit, &query_failed, ctx);
         if (query_failed) {
             failed = true;
             break;
@@ -963,7 +980,7 @@ static cr_match_result_t match_async_routes(cbm_store_t *src_store, const char *
         char handler_file[CBM_SZ_512] = {0};
         bool query_failed = false;
         int64_t handler_id =
-            find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
+            find_route_handler(tgt_store, tgt_project, route_qn, handler_name, sizeof(handler_name),
                                handler_file, sizeof(handler_file), &query_failed);
         if (query_failed) {
             failed = true;
@@ -1243,7 +1260,7 @@ static cr_match_result_t match_typed_routes(cbm_store_t *src_store, const char *
         char handler_name[CBM_SZ_256] = {0};
         char handler_file[CBM_SZ_512] = {0};
         int64_t handler_id =
-            find_route_handler(tgt_store, route_qn, handler_name, sizeof(handler_name),
+            find_route_handler(tgt_store, tgt_project, route_qn, handler_name, sizeof(handler_name),
                                handler_file, sizeof(handler_file), &query_failed);
         if (query_failed) {
             failed = true;

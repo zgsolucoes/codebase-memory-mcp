@@ -1141,7 +1141,45 @@ TEST(cross_repo_openapi_angular_service_binds_server_route) {
     PASS();
 }
 
+/* Route lookups are scoped to the target project: a Route and handler stored
+ * in the same .db under another project name (e.g. the "::missed" shadow
+ * project) are not the target serving the call. Scoping also lets the lookups
+ * use the (project, ...) indexes instead of scanning every node per call. */
+TEST(cross_repo_route_lookup_ignores_other_project_rows_in_target_store) {
+    cross_repo_fixture_t fixture;
+    bool setup =
+        cross_repo_fixture_begin(&fixture) &&
+        cross_repo_seed_http_pair(&fixture, "scope-client", "scope-api", "/orders/7", "scope") &&
+        cross_repo_exec(&fixture, "scope-api",
+                        "INSERT INTO projects(name, indexed_at, root_path) "
+                        "VALUES ('scope-api::other', '', '');"
+                        "UPDATE nodes SET project = 'scope-api::other';"
+                        "UPDATE edges SET project = 'scope-api::other';");
+    if (!setup) {
+        cross_repo_fixture_end(&fixture);
+        FAIL("failed to seed foreign-project route fixture");
+    }
+    const char *target = "scope-api";
+    cbm_cross_repo_result_t exact = cbm_cross_repo_match("scope-client", &target, 1);
+    /* Same foreign rows, reached through the template (fuzzy) lookup. */
+    bool templated = cross_repo_exec(&fixture, "scope-api",
+                                     "UPDATE nodes SET qualified_name = '__route__GET__/orders/{}' "
+                                     "WHERE label = 'Route';");
+    cbm_cross_repo_result_t fuzzy = cbm_cross_repo_match("scope-client", &target, 1);
+    cross_repo_fixture_end(&fixture);
+    cbm_cross_repo_result_free(&exact);
+    cbm_cross_repo_result_free(&fuzzy);
+
+    ASSERT_TRUE(templated);
+    ASSERT_FALSE(exact.failed);
+    ASSERT_FALSE(fuzzy.failed);
+    ASSERT_EQ(exact.http_edges, 0);
+    ASSERT_EQ(fuzzy.http_edges, 0);
+    PASS();
+}
+
 SUITE(cross_repo) {
+    RUN_TEST(cross_repo_route_lookup_ignores_other_project_rows_in_target_store);
     RUN_TEST(cross_repo_caller_local_handler_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_methodless_call_to_local_get_route_blocks_cross_http_issue1459);
     RUN_TEST(cross_repo_caller_without_local_handler_keeps_cross_http_issue1459);
